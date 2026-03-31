@@ -1,0 +1,116 @@
+import { useMemo } from "react";
+import {
+  ScatterChart,
+  Scatter,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from "recharts";
+import type { LookupResponse } from "@/lib/types";
+import { formatDKK, formatDate } from "@/lib/formatting";
+
+interface PriceScatterChartProps {
+  data: LookupResponse;
+}
+
+const AMBER = "#ffb700";
+const BLUE = "#4685e3";
+
+export function PriceScatterChart({ data }: PriceScatterChartProps) {
+  const addrs = data.addresses ?? [];
+  const sales = data.sales ?? [];
+
+  const { primaryData, nearbyData } = useMemo(() => {
+    const primary: Array<Record<string, unknown>> = [];
+    const nearby: Array<Record<string, unknown>> = [];
+
+    for (const s of sales) {
+      const point = {
+        date: new Date(s.when).getTime(),
+        amount: s.amount,
+        addr_idx: s.addr_idx,
+      };
+      if (s.addr_idx === data.primary_idx) {
+        primary.push(point);
+      } else {
+        nearby.push(point);
+      }
+    }
+    return { primaryData: primary, nearbyData: nearby };
+  }, [sales, data.primary_idx]);
+
+  const CustomTooltip = ({ active, payload }: any) => {
+    if (!active || !payload?.length) return null;
+    const point = payload[0].payload;
+    const addr = addrs[point.addr_idx];
+    if (!addr) return null;
+
+    return (
+      <div className="rounded-lg border bg-background px-3 py-2 text-xs shadow-lg space-y-1">
+        <p className="font-semibold">{addr.full_txt}</p>
+        <p>Pris: {formatDKK(point.amount)}</p>
+        <p>Dato: {formatDate(new Date(point.date).toISOString())}</p>
+        {addr.building_size > 0 && <p>Størrelse: {addr.building_size} m²</p>}
+        {addr.built_year > 0 && <p>Byggeår: {addr.built_year}</p>}
+        {addr.rooms > 0 && <p>Værelser: {addr.rooms}</p>}
+        {addr.energy_marking && (
+          <p>Energimærke: {addr.energy_marking.toUpperCase()}</p>
+        )}
+      </div>
+    );
+  };
+
+  const primaryAddr = addrs[data.primary_idx];
+
+  return (
+    <ResponsiveContainer width="100%" height={350}>
+      <ScatterChart margin={{ top: 10, right: 10, bottom: 20, left: 10 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis
+          type="number"
+          dataKey="date"
+          domain={["dataMin", "dataMax"]}
+          tickFormatter={(v) => new Date(v).getFullYear().toString()}
+          name="Dato"
+          fontSize={11}
+        />
+        <YAxis
+          type="number"
+          dataKey="amount"
+          tickFormatter={(v) =>
+            (v / 1000000).toFixed(1) + "M"
+          }
+          name="Salgspris"
+          fontSize={11}
+          label={{
+            value: "Salgspris (DKK)",
+            angle: -90,
+            position: "insideLeft",
+            style: { fontSize: 11 },
+          }}
+        />
+        <Tooltip content={<CustomTooltip />} />
+        <Legend />
+        <Scatter
+          name="Lokalområdet"
+          data={nearbyData}
+          fill={BLUE}
+          opacity={0.5}
+          r={3}
+        />
+        <Scatter
+          name={primaryAddr?.full_txt ?? "Søgt adresse"}
+          data={primaryData}
+          fill={AMBER}
+          stroke="#000"
+          strokeWidth={1}
+          r={5}
+          shape="diamond"
+        />
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}

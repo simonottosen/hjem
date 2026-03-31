@@ -1,19 +1,15 @@
 package hjem
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"gorm.io/gorm"
 )
 
@@ -39,48 +35,17 @@ var (
 	}
 )
 
-type BoligaCacherTask struct {
-	ctx   context.Context
-	index int
-	item  BoligaSaleItem
-	out   chan<- BoligaCacherResp
-}
-type BoligaCacherResp struct {
-	index int
-	prop  *BoligaProperty
-	err   error
-}
-
 type BoligaCacher interface {
-	io.Closer
 	FetchSales([]*Address, *Progress) ([][]Sale, error)
 }
 
 type boligaCacher struct {
 	db *gorm.DB
-	in chan BoligaCacherTask
 }
 
-func NewBoligaCacher(db *gorm.DB, n int) *boligaCacher {
-	in := make(chan BoligaCacherTask)
-
-	for i := 0; i < n; i++ {
-		go func() {
-			for task := range in {
-				prop, err := PropertyFromBoligaItem(task.item)
-				task.out <- BoligaCacherResp{task.index, prop, err}
-			}
-		}()
-	}
-
+func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 	db.AutoMigrate(&Sale{})
-
-	return &boligaCacher{db, in}
-}
-
-func (bc *boligaCacher) Close() error {
-	close(bc.in)
-	return nil
+	return &boligaCacher{db}
 }
 
 const oneMonth time.Duration = time.Hour * 24 * 31
@@ -113,98 +78,60 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 	if len(fetchAddrs) > 0 {
 		fetchTime := time.Now()
 		addrsToFetch := make([]*Address, len(fetchAddrs))
-		addrIds := make([]uint, len(fetchAddrs))
 		ids := make([]int, len(fetchAddrs))
 		var i int
 		for id, addr := range fetchAddrs {
-			addrIds[i] = addr.ID
 			addrsToFetch[i] = addr
 			ids[i] = id
 			i += 1
 		}
 
-		items, err := BoligaPropertiesFromAddrs(addrsToFetch, progress)
+		matched, err := BoligaSalesFromAddrs(addrsToFetch, progress)
 		if err != nil {
 			return nil, err
 		}
 
-		var totalProps int
-		for _, item := range items {
-			if item != nil {
-				totalProps++
-			}
-		}
-		var completedProps int
-		progress.Update(StageBoligaProp, fmt.Sprintf("Henter boligdetaljer: %d/%d", 0, totalProps), 0, totalProps)
-
-		var wg sync.WaitGroup
-		out := make(chan BoligaCacherResp)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		go func() {
-			defer close(out)
-
-			for i, item := range items {
-				if item == nil {
-					continue
-				}
-
-				if ctx.Err() != nil {
-					break
-				}
-
-				wg.Add(1)
-				bc.in <- BoligaCacherTask{
-					item:  *item,
-					index: ids[i],
-					out:   out,
-				}
-			}
-
-			wg.Wait()
-		}()
-
 		var salesToStore []Sale
-		var rerr error
-		for resp := range out {
-			wg.Done()
-			completedProps++
-			progress.Update(StageBoligaProp, fmt.Sprintf("Henter boligdetaljer: %d/%d", completedProps, totalProps), completedProps, totalProps)
-			if err := resp.err; err != nil {
-				rerr = err
-				cancel()
+		for i, items := range matched {
+			if len(items) == 0 {
 				continue
 			}
 
-			psales := make([]Sale, len(resp.prop.Sales))
-			addr := addrs[resp.index]
-			for i, sale := range resp.prop.Sales {
-				sale.AddrID = addr.ID
-				psales[i] = sale
+			origIdx := ids[i]
+			addr := addrs[origIdx]
+
+			psales := make([]Sale, len(items))
+			for j, item := range items {
+				psales[j] = Sale{
+					AddrID:    addr.ID,
+					AmountDKK: item.AmountDKK,
+					Date:      item.SoldDate,
+				}
 			}
 
-			sales[resp.index] = psales
+			sales[origIdx] = psales
 			salesToStore = append(salesToStore, psales...)
 
+			// Update address with best available Boliga metadata across all matched sales
 			addr.BoligaCollectedAt = fetchTime
-			addr.BoligaBuiltYear = resp.prop.BuiltYear
-			addr.BoligaBasementSize = resp.prop.BasementSize
-			addr.BoligaBuildingSize = resp.prop.BuildingSize
-			addr.BoligaRooms = resp.prop.Rooms
-			addr.BoligaPropertySize = resp.prop.PropertySize
-			addr.BoligaMonthlyOwnerExpense = resp.prop.MonthlyOwnerExpense
-			addr.BoligaEnergyMarking = resp.prop.EnergyMarking
-			addr.BoligaPropertyKind = resp.prop.Kind
+			for _, item := range items {
+				if addr.BoligaBuildingSize == 0 && item.SqMeters > 0 {
+					addr.BoligaBuildingSize = item.SqMeters
+				}
+				if addr.BoligaBuiltYear == 0 && item.BuildYear > 0 {
+					addr.BoligaBuiltYear = item.BuildYear
+				}
+				if addr.BoligaRooms == 0 && item.Rooms > 0 {
+					addr.BoligaRooms = int(item.Rooms)
+				}
+				if addr.BoligaPropertyKind == 0 && item.PropertyType > 0 {
+					addr.BoligaPropertyKind = item.PropertyType
+				}
+			}
 
 			if err := bc.db.Save(&addr).Error; err != nil {
 				return nil, err
 			}
-
-		}
-
-		if rerr != nil {
-			return nil, rerr
 		}
 
 		if err := bc.db.CreateInBatches(&salesToStore, 50).Error; err != nil {
@@ -240,18 +167,6 @@ type Sale struct {
 	Date      time.Time `json:"time"`
 }
 
-type BoligaProperty struct {
-	Kind                PropertyType
-	BuildingSize        int
-	PropertySize        int
-	BasementSize        int
-	Rooms               int
-	BuiltYear           int
-	MonthlyOwnerExpense int
-	EnergyMarking       string
-	Sales               []Sale
-}
-
 type BoligaSaleItem struct {
 	EstateId   int       `json:"estateId"`
 	EstateCode int       `json:"estateCode"`
@@ -282,7 +197,9 @@ type BoligaPageCrawl struct {
 	CreatedAt   time.Time
 }
 
-func BoligaPropertiesFromAddrs(addrs []*Address, progress *Progress) ([]*BoligaSaleItem, error) {
+// BoligaSalesFromAddrs fetches Boliga sale listings for the given addresses
+// and returns matched sales grouped by address index.
+func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleItem, error) {
 	type K struct {
 		Municipality string
 		Street       string
@@ -323,89 +240,60 @@ func BoligaPropertiesFromAddrs(addrs []*Address, progress *Progress) ([]*BoligaS
 	}
 	log.Printf("Boliga total sales fetched: %d", len(totalSales))
 
+	// Build lookup maps at multiple levels:
+	// 1. Exact address string match
+	// 2. Normalized string match (trim, lowercase, etc.)
+	// 3. Building-level match (street + number only) as fallback
 	z := map[string]int{}
+	zNorm := map[string]int{}
+	zBuilding := map[string]int{} // "street number" → first address index in that building
 	for i, addr := range addrs {
-		z[addr.Short()] = i
+		short := addr.Short()
+		z[short] = i
+		zNorm[normalizeAddr(short)] = i
+
+		building := fmt.Sprintf("%s %s", addr.StreetName, addr.StreetNumber)
+		if _, ok := zBuilding[building]; !ok {
+			zBuilding[building] = i
+		}
 	}
 
-	log.Printf("Debug: z map has %d entries, totalSales has %d entries", len(z), len(totalSales))
-
-	// Find a Boliga address where DAWA also has the same street+number
-	if len(totalSales) > 0 {
-		for _, s := range totalSales {
-			parts := strings.SplitN(s.Addr, ",", 2)
-			if len(parts) == 0 {
-				continue
-			}
-			streetNum := strings.TrimSpace(parts[0])
-			for key := range z {
-				if strings.HasPrefix(key, streetNum) {
-					log.Printf("CLOSE PAIR found:")
-					log.Printf("  Boliga: %q (bytes: %x)", s.Addr, []byte(s.Addr))
-					log.Printf("  DAWA:   %q (bytes: %x)", key, []byte(key))
-					log.Printf("  Equal: %v", key == s.Addr)
-					goto debugDone
-				}
-			}
-		}
-		log.Printf("NO close pairs found at all! Dumping street+num combos:")
-		dawaStreetNums := map[string]bool{}
-		for key := range z {
-			parts := strings.SplitN(key, ",", 2)
-			if len(parts) > 0 {
-				dawaStreetNums[strings.TrimSpace(parts[0])] = true
-			}
-		}
-		boligaStreetNums := map[string]bool{}
-		for _, s := range totalSales {
-			parts := strings.SplitN(s.Addr, ",", 2)
-			if len(parts) > 0 {
-				boligaStreetNums[strings.TrimSpace(parts[0])] = true
-			}
-		}
-		log.Printf("  Sample DAWA street+nums (first 10):")
-		var dc int
-		for sn := range dawaStreetNums {
-			if dc >= 10 {
-				break
-			}
-			log.Printf("    %q", sn)
-			dc++
-		}
-		log.Printf("  Sample Boliga street+nums (first 10):")
-		var bc int
-		for sn := range boligaStreetNums {
-			if bc >= 10 {
-				break
-			}
-			log.Printf("    %q", sn)
-			bc++
-		}
-		// Check overlap
-		var overlap int
-		for sn := range boligaStreetNums {
-			if dawaStreetNums[sn] {
-				overlap++
-			}
-		}
-		log.Printf("  Street+num overlap: %d", overlap)
-	}
-debugDone:
-
-	var matches int
-
-	props := make([]*BoligaSaleItem, len(addrs))
-	for i, _ := range totalSales {
+	var exactMatches, normMatches, buildingMatches int
+	result := make([][]BoligaSaleItem, len(addrs))
+	for i := range totalSales {
 		s := totalSales[i]
-		j, ok := z[s.Addr]
-		if ok {
-			matches += 1
-			props[j] = &s
+
+		// Try exact match first
+		if j, ok := z[s.Addr]; ok {
+			exactMatches++
+			result[j] = append(result[j], s)
+			continue
+		}
+
+		// Fallback: normalized match (trim, collapse whitespace, strip trailing periods)
+		if j, ok := zNorm[normalizeAddr(s.Addr)]; ok {
+			normMatches++
+			result[j] = append(result[j], s)
+			continue
+		}
+
+		// Fallback: building-level match (same street+number, different apartment)
+		// Extract building part from Boliga address ("Vejnavn 42, 3. tv" → "Vejnavn 42")
+		boligaBuilding := s.Addr
+		if idx := strings.Index(s.Addr, ","); idx > 0 {
+			boligaBuilding = strings.TrimSpace(s.Addr[:idx])
+		}
+		if j, ok := zBuilding[boligaBuilding]; ok {
+			buildingMatches++
+			result[j] = append(result[j], s)
+			continue
 		}
 	}
-	log.Printf("Boliga matched %d/%d sales to addresses", matches, len(totalSales))
+	log.Printf("Boliga matched %d exact + %d normalized + %d building-level = %d/%d sales",
+		exactMatches, normMatches, buildingMatches,
+		exactMatches+normMatches+buildingMatches, len(totalSales))
 
-	return props, nil
+	return result, nil
 }
 
 type BoligaSalesResponse struct {
@@ -485,142 +373,6 @@ func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
 	return sales, nil
 }
 
-func PropertyFromBoligaItem(si BoligaSaleItem) (*BoligaProperty, error) {
-	query := fmt.Sprintf("https://www.boliga.dk/salg/info/%d/%d/%s",
-		si.MunicipalityCode,
-		si.EstateCode,
-		si.Guid,
-	)
-	log.Printf("Fetching Boliga property: %s", query)
-	resp, err := DefaultClient.Get(query)
-	if err != nil {
-		log.Printf("Boliga property request failed: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Boliga property page returned status %d", resp.StatusCode)
-		return nil, fmt.Errorf("boliga property page returned status %d", resp.StatusCode)
-	}
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	prop := BoligaProperty{
-		Kind:         si.PropertyType,
-		BuiltYear:    si.BuildYear,
-		BuildingSize: si.SqMeters,
-		Rooms:        int(si.Rooms),
-	}
-	path, ok := doc.Find(".sales-overview-table.h-100 .table-row").Find("a").Attr("href")
-	if ok {
-		query = "https://www.boliga.dk" + path
-		resp, err = DefaultClient.Get(query)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("boliga listing page returned status %d", resp.StatusCode)
-		}
-
-		err := ReadListingToProperty(resp.Body, &prop)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	uniqueSales := map[Sale]struct{}{}
-	doc.Find(".sales-overview-table").First().Find("tbody tr").Each(func(i int, s *goquery.Selection) {
-		cols := s.Find("td")
-		kind := strings.TrimSpace(cols.Eq(3).Find("span").Eq(1).Text())
-		if strings.Contains(kind, "frit salg") {
-			amount, _ := DirtyStringToInt(cols.Eq(1).Find("span").Eq(1).Text())
-			timestr := cols.Eq(2).Find("span").Eq(1).Text()
-
-			saleDate, _ := DanishDateToTime("2. jan. 2006", timestr)
-			uniqueSales[Sale{
-				AmountDKK: amount,
-				Date:      saleDate,
-			}] = struct{}{}
-		}
-	})
-
-	for sale, _ := range uniqueSales {
-		prop.Sales = append(prop.Sales, sale)
-	}
-
-	return &prop, nil
-}
-
-func ReadListingToProperty(reader io.ReadCloser, prop *BoligaProperty) error {
-	doc, err := goquery.NewDocumentFromReader(reader)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
-	doc.Find("app-property-detail").Each(func(i int, s *goquery.Selection) {
-		spans := s.Find("span")
-		detail := strings.TrimSpace(spans.Eq(0).Text())
-		detail = strings.ToLower(detail)
-		detail = strings.TrimSuffix(detail, ":")
-		value := strings.TrimSpace(spans.Eq(1).Text())
-
-		switch detail {
-		case "boligstørrelse":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-			prop.BuildingSize = v
-		case "byggeår":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-			prop.BuiltYear = v
-		case "værelser":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-			prop.Rooms = v
-		case "ejerudgift":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-			prop.MonthlyOwnerExpense = v
-		case "grundstørrelse":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-			prop.PropertySize = v
-		case "energimærke":
-			if value == "0" {
-				return
-			}
-			prop.EnergyMarking = strings.ToLower(value)
-		case "kælderstørrelse":
-			v, err := DirtyStringToInt(value)
-			if err != nil {
-				return
-			}
-
-			prop.BasementSize = v
-
-		}
-	})
-
-	return nil
-}
-
 var (
 	numbersOnlyRegexp = regexp.MustCompile(`^[0-9]+`)
 )
@@ -675,6 +427,21 @@ func DanishDateToTime(format string, s string) (time.Time, error) {
 	}
 
 	return time.Parse(format, s)
+}
+
+var whitespaceRun = regexp.MustCompile(`\s+`)
+
+// normalizeAddr collapses whitespace, trims, lowercases, and strips
+// trailing periods to handle format variations between DAWA and Boliga.
+func normalizeAddr(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ToLower(s)
+	s = whitespaceRun.ReplaceAllString(s, " ")
+	s = strings.TrimRight(s, ".")
+	// Normalize ", " vs "," (Boliga sometimes omits the space)
+	s = strings.ReplaceAll(s, ",", ", ")
+	s = whitespaceRun.ReplaceAllString(s, " ")
+	return s
 }
 
 func FilterAddressesByProperty(pt PropertyType, addrs []*Address, sales [][]Sale) ([]*Address, [][]Sale) {

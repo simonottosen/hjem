@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,7 +29,7 @@ type Response struct {
 
 func NewServer(db *gorm.DB) *server {
 	dc := NewDawaCacher(db)
-	bc := NewBoligaCacher(db, 4)
+	bc := NewBoligaCacher(db)
 
 	return &server{
 		dc:       dc,
@@ -231,7 +232,7 @@ func (s *server) handleProgress() http.HandlerFunc {
 	}
 }
 
-//go:embed frontend/index.html
+//go:embed frontend/dist/index.html
 var indexBytes []byte
 
 func (s *server) handleIndex() http.HandlerFunc {
@@ -380,23 +381,34 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 	}
 
 	var projections []map[time.Time]int
-	for _, s := range sales[resp.PrimaryIndex] {
-		m := map[time.Time]int{}
-		sqMeterPrice := s.AmountDKK / addrs[0].BoligaBuildingSize
-		yearInt, _, _ := s.Date.Date()
-		saleYear, _ := time.Parse("2-1-2006", fmt.Sprintf("1-1-%d", yearInt))
+	primaryBuildingSize := addrs[0].BoligaBuildingSize
+	if primaryBuildingSize > 0 {
+		for _, s := range sales[resp.PrimaryIndex] {
+			m := map[time.Time]int{}
+			sqMeterPrice := float64(s.AmountDKK) / float64(primaryBuildingSize)
+			yearInt, _, _ := s.Date.Date()
+			saleYear, _ := time.Parse("2-1-2006", fmt.Sprintf("1-1-%d", yearInt))
 
-		factor := float64(sqMeterPrice) / float64(resp.SquareMeters.Global[saleYear].Mean)
-		for t, agg := range resp.SquareMeters.Global {
-			if t == saleYear {
-				m[t] = sqMeterPrice
+			globalMean := resp.SquareMeters.Global[saleYear].Mean
+			if globalMean == 0 {
+				continue
 			}
-			if t.After(saleYear) {
-				m[t] = int(float64(agg.Mean) * factor)
+			factor := sqMeterPrice / float64(globalMean)
+
+			for t, agg := range resp.SquareMeters.Global {
+				if agg.Mean == 0 {
+					continue
+				}
+				if t == saleYear {
+					m[t] = int(math.Round(sqMeterPrice))
+				}
+				if t.After(saleYear) {
+					m[t] = int(math.Round(float64(agg.Mean) * factor))
+				}
 			}
+
+			projections = append(projections, m)
 		}
-
-		projections = append(projections, m)
 	}
 	resp.SquareMeters.Projections = projections
 

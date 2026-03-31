@@ -60,11 +60,11 @@ type Address struct {
 func (addr Address) Short() string {
 	s := fmt.Sprintf("%s %s", addr.StreetName, addr.StreetNumber)
 	if addr.Floor != nil {
-		s += fmt.Sprintf(", %s", *addr.Floor)
+		s += fmt.Sprintf(", %s.", *addr.Floor)
 	}
 
 	if addr.Door != nil {
-		s += fmt.Sprintf(". %s", *addr.Door)
+		s += fmt.Sprintf(" %s", *addr.Door)
 	}
 
 	return s
