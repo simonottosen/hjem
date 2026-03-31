@@ -1,12 +1,26 @@
 import { useMemo } from "react";
 import type { LookupResponse } from "@/lib/types";
-import { formatDKK, formatDate } from "@/lib/formatting";
+import { formatDKK, formatDate, formatPct } from "@/lib/formatting";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Home, TrendingUp, Landmark, BarChart3 } from "lucide-react";
+import { Home, TrendingUp, Landmark, BarChart3, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 interface MetricsRowProps {
   data: LookupResponse;
+}
+
+function PctBadge({ pct }: { pct: number }) {
+  const positive = pct >= 0;
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 text-xs font-medium ${
+        positive ? "text-emerald-600" : "text-red-500"
+      }`}
+    >
+      {positive ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
+      {formatPct(pct)}
+    </span>
+  );
 }
 
 export function MetricsRow({ data }: MetricsRowProps) {
@@ -23,6 +37,13 @@ export function MetricsRow({ data }: MetricsRowProps) {
   }, [sales, data.primary_idx]);
 
   const lastSale = primarySales[0];
+  const prevSale = primarySales[1];
+
+  // % change between last two sales of primary address
+  const salePctChange = useMemo(() => {
+    if (!lastSale || !prevSale || prevSale.amount === 0) return null;
+    return ((lastSale.amount - prevSale.amount) / prevSale.amount) * 100;
+  }, [lastSale, prevSale]);
 
   // Latest year aggregation
   const globalEntries = Object.entries(data.sqmeters.global);
@@ -30,12 +51,18 @@ export function MetricsRow({ data }: MetricsRowProps) {
     ([a], [b]) => new Date(b).getTime() - new Date(a).getTime()
   );
   const latest = sorted[0];
+  const prevYear = sorted[1];
 
-  // Sqm-based projected value: latest projected sqm price × building size
+  // Year-over-year sqm price change
+  const yoyPctChange = useMemo(() => {
+    if (!latest || !prevYear || prevYear[1].mean === 0) return null;
+    return ((latest[1].mean - prevYear[1].mean) / prevYear[1].mean) * 100;
+  }, [latest, prevYear]);
+
+  // Sqm-based projected value
   const sqmProjectedValue = useMemo(() => {
     if (!primary?.building_size) return null;
 
-    // Use the latest projection point if available
     if (data.sqmeters.projections?.length) {
       const lastProj =
         data.sqmeters.projections[data.sqmeters.projections.length - 1];
@@ -57,7 +84,6 @@ export function MetricsRow({ data }: MetricsRowProps) {
       }
     }
 
-    // Fallback: use latest area average
     if (latest) {
       return {
         value: Math.round(latest[1].mean * primary.building_size),
@@ -67,6 +93,12 @@ export function MetricsRow({ data }: MetricsRowProps) {
 
     return null;
   }, [data.sqmeters, primary, latest]);
+
+  // % change from last sale to estimated value
+  const estimatePctChange = useMemo(() => {
+    if (!sqmProjectedValue || !lastSale || lastSale.amount === 0) return null;
+    return ((sqmProjectedValue.value - lastSale.amount) / lastSale.amount) * 100;
+  }, [sqmProjectedValue, lastSale]);
 
   return (
     <div className="space-y-3">
@@ -102,7 +134,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
           </CardContent>
         </Card>
 
-        {/* Card 2: Last sale price for this address */}
+        {/* Card 2: Last sale price + % change from previous sale */}
         <Card className="py-4">
           <CardHeader className="pb-1 px-4">
             <CardTitle className="text-xs text-muted-foreground flex items-center gap-1">
@@ -113,7 +145,10 @@ export function MetricsRow({ data }: MetricsRowProps) {
           <CardContent className="px-4">
             {lastSale ? (
               <>
-                <p className="text-2xl font-bold">{formatDKK(lastSale.amount)}</p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-2xl font-bold">{formatDKK(lastSale.amount)}</p>
+                  {salePctChange != null && <PctBadge pct={salePctChange} />}
+                </div>
                 <p className="text-xs text-muted-foreground">
                   {formatDate(lastSale.when)}
                   {primary?.building_size > 0 && (
@@ -123,9 +158,9 @@ export function MetricsRow({ data }: MetricsRowProps) {
                     </span>
                   )}
                 </p>
-                {primarySales.length > 1 && (
+                {prevSale && (
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    {primarySales.length} salg i alt
+                    Forrige: {formatDKK(prevSale.amount)} ({formatDate(prevSale.when)})
                   </p>
                 )}
               </>
@@ -135,7 +170,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
           </CardContent>
         </Card>
 
-        {/* Card 3: Estimated value — sqm-based projection */}
+        {/* Card 3: Estimated value + % change from last sale */}
         <Card className="py-4">
           <CardHeader className="pb-1 px-4">
             <CardTitle className="text-xs text-muted-foreground flex items-center gap-1">
@@ -144,15 +179,22 @@ export function MetricsRow({ data }: MetricsRowProps) {
             </CardTitle>
           </CardHeader>
           <CardContent className="px-4 space-y-2">
-            {/* Sqm-based projection (matches the chart) */}
             {sqmProjectedValue ? (
               <div>
-                <p className="text-2xl font-bold">
-                  ~{formatDKK(sqmProjectedValue.value)}
-                </p>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-2xl font-bold">
+                    ~{formatDKK(sqmProjectedValue.value)}
+                  </p>
+                  {estimatePctChange != null && <PctBadge pct={estimatePctChange} />}
+                </div>
                 <p className="text-xs text-muted-foreground">
                   {sqmProjectedValue.sqmPrice.toLocaleString("da-DK")} kr/m² × {primary.building_size} m²
                 </p>
+                {estimatePctChange != null && lastSale && (
+                  <p className="text-xs text-muted-foreground">
+                    siden salg i {new Date(lastSale.when).getFullYear()}
+                  </p>
+                )}
               </div>
             ) : latest ? (
               <div>
@@ -165,7 +207,6 @@ export function MetricsRow({ data }: MetricsRowProps) {
               <p className="text-muted-foreground">—</p>
             )}
 
-            {/* Dingeo range as secondary info */}
             {valuation && valuation.mean > 0 && (
               <div className="border-t pt-1.5">
                 <p className="text-xs text-muted-foreground">
@@ -176,7 +217,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
           </CardContent>
         </Card>
 
-        {/* Card 4: Data overview */}
+        {/* Card 4: Data overview + YoY sqm change */}
         <Card className="py-4">
           <CardHeader className="pb-1 px-4">
             <CardTitle className="text-xs text-muted-foreground flex items-center gap-1">
@@ -189,11 +230,13 @@ export function MetricsRow({ data }: MetricsRowProps) {
             <p className="text-xs text-muted-foreground">
               salg fra {addrs.length} adresser
             </p>
-            {sorted.length > 1 && (
-              <p className="text-xs text-muted-foreground">
-                {new Date(sorted[sorted.length - 1][0]).getFullYear()}–
-                {new Date(sorted[0][0]).getFullYear()}
-              </p>
+            {latest && (
+              <div className="flex items-center gap-1.5 mt-1">
+                <p className="text-xs text-muted-foreground">
+                  m²-pris {new Date(latest[0]).getFullYear()}:
+                </p>
+                {yoyPctChange != null && <PctBadge pct={yoyPctChange} />}
+              </div>
             )}
           </CardContent>
         </Card>

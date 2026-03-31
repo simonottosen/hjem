@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import type { LookupResponse } from "@/lib/types";
-import { formatDKK, formatDate } from "@/lib/formatting";
+import { formatDKK, formatDate, formatPct } from "@/lib/formatting";
 import {
   Table,
   TableBody,
@@ -9,20 +9,19 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { ArrowUpDown } from "lucide-react";
+import { ArrowUpDown, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 interface SalesTableProps {
   data: LookupResponse;
 }
 
-type SortKey = "address" | "amount" | "sqmPrice" | "date" | "size" | "year" | "rooms";
+type SortKey = "address" | "amount" | "sqmPrice" | "vsAvg" | "date" | "size" | "year" | "rooms";
 type SortDir = "asc" | "desc";
 
 export function SalesTable({ data }: SalesTableProps) {
@@ -34,13 +33,31 @@ export function SalesTable({ data }: SalesTableProps) {
   const primary = addrs[data.primary_idx];
   const primarySize = primary?.building_size ?? 0;
 
+  // Build a year → mean sqm price lookup from global aggregations
+  const yearMeanMap = useMemo(() => {
+    const m: Record<number, number> = {};
+    for (const [dateStr, agg] of Object.entries(data.sqmeters.global)) {
+      const year = new Date(dateStr).getFullYear();
+      m[year] = agg.mean;
+    }
+    return m;
+  }, [data.sqmeters.global]);
+
   const sorted = useMemo(() => {
     const items = sales.map((s) => {
       const addr = addrs[s.addr_idx];
-      // Use per-sale sq_meters if available, fall back to address building_size
       const size = s.sq_meters > 0 ? s.sq_meters : (addr?.building_size ?? 0);
       const sqmPrice = size > 0 ? Math.round(s.amount / size) : null;
-      return { ...s, addr, sqmPrice, size };
+
+      // % difference from area average for that year
+      const saleYear = new Date(s.when).getFullYear();
+      const areaAvg = yearMeanMap[saleYear];
+      const vsAvg =
+        sqmPrice != null && areaAvg && areaAvg > 0
+          ? ((sqmPrice - areaAvg) / areaAvg) * 100
+          : null;
+
+      return { ...s, addr, sqmPrice, size, vsAvg };
     });
 
     items.sort((a, b) => {
@@ -57,6 +74,9 @@ export function SalesTable({ data }: SalesTableProps) {
           break;
         case "sqmPrice":
           cmp = (a.sqmPrice ?? 0) - (b.sqmPrice ?? 0);
+          break;
+        case "vsAvg":
+          cmp = (a.vsAvg ?? 0) - (b.vsAvg ?? 0);
           break;
         case "date":
           cmp =
@@ -76,7 +96,7 @@ export function SalesTable({ data }: SalesTableProps) {
     });
 
     return items;
-  }, [sales, addrs, sortKey, sortDir]);
+  }, [sales, addrs, sortKey, sortDir, yearMeanMap]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
@@ -109,13 +129,14 @@ export function SalesTable({ data }: SalesTableProps) {
 
   return (
     <TooltipProvider>
-      <ScrollArea className="h-[400px]">
+      <div className="min-w-[800px]">
         <Table>
           <TableHeader>
             <TableRow>
               <SortHeader label="Adresse" sortId="address" />
               <SortHeader label="Salgspris" sortId="amount" />
               <SortHeader label="kr/m²" sortId="sqmPrice" />
+              <SortHeader label="vs. gns." sortId="vsAvg" />
               <SortHeader label="Dato" sortId="date" />
               <SortHeader label="m²" sortId="size" />
               <SortHeader label="Byggeår" sortId="year" />
@@ -173,6 +194,24 @@ export function SalesTable({ data }: SalesTableProps) {
                     )}
                   </TableCell>
                   <TableCell className="text-xs">
+                    {s.vsAvg != null ? (
+                      <span
+                        className={`inline-flex items-center gap-0.5 font-medium ${
+                          s.vsAvg >= 0 ? "text-emerald-600" : "text-red-500"
+                        }`}
+                      >
+                        {s.vsAvg >= 0 ? (
+                          <ArrowUpRight className="size-3" />
+                        ) : (
+                          <ArrowDownRight className="size-3" />
+                        )}
+                        {formatPct(s.vsAvg)}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs">
                     {formatDate(s.when)}
                   </TableCell>
                   <TableCell className="text-xs">
@@ -189,7 +228,7 @@ export function SalesTable({ data }: SalesTableProps) {
             })}
           </TableBody>
         </Table>
-      </ScrollArea>
+      </div>
     </TooltipProvider>
   );
 }

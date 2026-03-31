@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Search } from "lucide-react";
+import { Search, Info } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface SearchFormProps {
   onSearch: (query: string, range: number, filter: number) => void;
@@ -43,8 +49,22 @@ export function SearchForm({ onSearch, isLoading }: SearchFormProps) {
       </div>
       <div className="flex gap-4">
         <div className="flex-1 space-y-1">
-          <label className="text-xs text-muted-foreground font-medium">
+          <label className="text-xs text-muted-foreground font-medium inline-flex items-center gap-1">
             Filtrering
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex items-center justify-center size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help">
+                    <Info className="size-2.5" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-[250px] text-xs">
+                  Fjerner salg der afviger kraftigt fra gennemsnittet i området.
+                  Jo lavere sigma-værdi, jo flere afvigende salg filtreres fra.
+                  Vælg "Ingen" for at se alle salg.
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </label>
           <Select value={filter} onValueChange={setFilter}>
             <SelectTrigger className="w-full">
