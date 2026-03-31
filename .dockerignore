@@ -1,0 +1,10 @@
+frontend/node_modules
+frontend/dist
+app/hjem.db
+app/hjem.db-wal
+app/hjem.db-shm
+*.db
+.git
+.github
+.claude
+main

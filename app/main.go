@@ -20,6 +20,16 @@ func main() {
 		panic("failed to connect database")
 	}
 
+	sqlDB, err := db.DB()
+	if err != nil {
+		panic("failed to get underlying sql.DB")
+	}
+	sqlDB.SetMaxOpenConns(1)
+
+	// Enable WAL mode and busy timeout for concurrent access
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA busy_timeout=5000")
+
 	s := hjem.NewServer(db)
 	fmt.Printf("Server started on http://localhost:%d\n", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), s.Routes()); err != nil {

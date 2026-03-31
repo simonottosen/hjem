@@ -20,6 +20,7 @@ export interface Address {
 export interface Sale {
   addr_idx: number;
   amount: number;
+  sq_meters: number;
   when: string; // ISO 8601
 }
 
@@ -34,12 +35,30 @@ export interface SquareMeterPrices {
   projections: Array<Record<string, number>>;
 }
 
+export interface DingeoEstimate {
+  name: string;
+  link: string;
+  value: number;
+}
+
+export interface DingeoValuation {
+  adresseId: string;
+  includedEvals: DingeoEstimate[];
+  outlierEvals: DingeoEstimate[];
+  minVal: number;
+  maxVal: number;
+  mean: number;
+  standdev: number;
+  countEvals: number;
+}
+
 export interface LookupResponse {
   primary_idx: number;
   addresses: Address[] | null;
   sales: Sale[] | null;
   ranges: Record<number, number[]> | null;
   sqmeters: SquareMeterPrices;
+  valuation?: DingeoValuation | null;
   error?: string;
 }
 

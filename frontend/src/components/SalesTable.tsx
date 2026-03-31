@@ -10,6 +10,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ArrowUpDown } from "lucide-react";
 
 interface SalesTableProps {
@@ -25,15 +31,16 @@ export function SalesTable({ data }: SalesTableProps) {
 
   const addrs = data.addresses ?? [];
   const sales = data.sales ?? [];
+  const primary = addrs[data.primary_idx];
+  const primarySize = primary?.building_size ?? 0;
 
   const sorted = useMemo(() => {
     const items = sales.map((s) => {
       const addr = addrs[s.addr_idx];
-      const sqmPrice =
-        addr?.building_size > 0
-          ? Math.round(s.amount / addr.building_size)
-          : null;
-      return { ...s, addr, sqmPrice };
+      // Use per-sale sq_meters if available, fall back to address building_size
+      const size = s.sq_meters > 0 ? s.sq_meters : (addr?.building_size ?? 0);
+      const sqmPrice = size > 0 ? Math.round(s.amount / size) : null;
+      return { ...s, addr, sqmPrice, size };
     });
 
     items.sort((a, b) => {
@@ -56,7 +63,7 @@ export function SalesTable({ data }: SalesTableProps) {
             new Date(a.when).getTime() - new Date(b.when).getTime();
           break;
         case "size":
-          cmp = (a.addr?.building_size ?? 0) - (b.addr?.building_size ?? 0);
+          cmp = (a.size ?? 0) - (b.size ?? 0);
           break;
         case "year":
           cmp = (a.addr?.built_year ?? 0) - (b.addr?.built_year ?? 0);
@@ -101,56 +108,88 @@ export function SalesTable({ data }: SalesTableProps) {
   }
 
   return (
-    <ScrollArea className="h-[400px]">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <SortHeader label="Adresse" sortId="address" />
-            <SortHeader label="Salgspris" sortId="amount" />
-            <SortHeader label="kr/m²" sortId="sqmPrice" />
-            <SortHeader label="Dato" sortId="date" />
-            <SortHeader label="m²" sortId="size" />
-            <SortHeader label="Byggeår" sortId="year" />
-            <SortHeader label="Vær." sortId="rooms" />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sorted.map((s, i) => (
-            <TableRow
-              key={i}
-              className={
-                s.addr_idx === data.primary_idx
-                  ? "bg-chart-1/10 hover:bg-chart-1/20"
-                  : ""
-              }
-            >
-              <TableCell className="max-w-[200px] truncate text-xs">
-                {s.addr?.full_txt ?? "—"}
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {formatDKK(s.amount)}
-              </TableCell>
-              <TableCell className="font-mono text-xs text-muted-foreground">
-                {s.sqmPrice != null
-                  ? s.sqmPrice.toLocaleString("da-DK")
-                  : "—"}
-              </TableCell>
-              <TableCell className="text-xs">
-                {formatDate(s.when)}
-              </TableCell>
-              <TableCell className="text-xs">
-                {s.addr?.building_size || "—"}
-              </TableCell>
-              <TableCell className="text-xs">
-                {s.addr?.built_year || "—"}
-              </TableCell>
-              <TableCell className="text-xs">
-                {s.addr?.rooms || "—"}
-              </TableCell>
+    <TooltipProvider>
+      <ScrollArea className="h-[400px]">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <SortHeader label="Adresse" sortId="address" />
+              <SortHeader label="Salgspris" sortId="amount" />
+              <SortHeader label="kr/m²" sortId="sqmPrice" />
+              <SortHeader label="Dato" sortId="date" />
+              <SortHeader label="m²" sortId="size" />
+              <SortHeader label="Byggeår" sortId="year" />
+              <SortHeader label="Vær." sortId="rooms" />
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </ScrollArea>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((s, i) => {
+              const primaryValue =
+                s.sqmPrice != null && primarySize > 0
+                  ? s.sqmPrice * primarySize
+                  : null;
+
+              return (
+                <TableRow
+                  key={i}
+                  className={
+                    s.addr_idx === data.primary_idx
+                      ? "bg-chart-1/10 hover:bg-chart-1/20"
+                      : ""
+                  }
+                >
+                  <TableCell className="max-w-[200px] truncate text-xs">
+                    {s.addr?.full_txt ?? "—"}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {formatDKK(s.amount)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {s.sqmPrice != null ? (
+                      primaryValue != null ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-help underline decoration-dotted underline-offset-2">
+                              {s.sqmPrice.toLocaleString("da-DK")}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs">
+                            <p className="font-semibold text-xs">
+                              {primary?.full_txt}
+                            </p>
+                            <p className="text-xs">
+                              {s.sqmPrice.toLocaleString("da-DK")} kr/m² × {primarySize} m² ={" "}
+                              <span className="font-bold">
+                                {formatDKK(primaryValue)}
+                              </span>
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span>{s.sqmPrice.toLocaleString("da-DK")}</span>
+                      )
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {formatDate(s.when)}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {s.size || "—"}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {s.addr?.built_year || "—"}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {s.addr?.rooms || "—"}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </ScrollArea>
+    </TooltipProvider>
   );
 }

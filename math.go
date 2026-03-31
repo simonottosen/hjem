@@ -3,6 +3,7 @@ package hjem
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -38,27 +39,67 @@ func AggregationFromPrices(prices []float64) Aggregation {
 	}
 }
 
-// SeperateOutliers splits sales into normal and outlier sets based on
-// mean ± stdf*std of the per-sqm price.
-func SeperateOutliers(sales []*JSONSale, prices []float64, aggr Aggregation, stdf int) ([]float64, []*JSONSale) {
-	var normal []float64
-	var outliers []*JSONSale
+// median returns the median of a sorted slice.
+func median(sorted []float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n%2 == 0 {
+		return (sorted[n/2-1] + sorted[n/2]) / 2
+	}
+	return sorted[n/2]
+}
 
-	lowb := float64(aggr.Mean) - float64(aggr.Std)*float64(stdf)
-	upperb := float64(aggr.Mean) + float64(aggr.Std)*float64(stdf)
-	for i := range sales {
-		p := prices[i]
-		s := sales[i]
-
-		if p < lowb || p > upperb {
-			outliers = append(outliers, s)
-			continue
-		}
-
-		normal = append(normal, p)
+// removeOutliersIQR uses the Interquartile Range method to identify outliers.
+// This is robust against extreme values — unlike mean±std, the IQR is not
+// distorted by a few 27M kr whole-building sales mixed in with 2M apartment sales.
+// multiplier controls sensitivity: 1.5 is standard, lower is more aggressive.
+func removeOutliersIQR(sales []*JSONSale, prices []float64, multiplier float64) ([]float64, []*JSONSale) {
+	if len(prices) < 4 {
+		return prices, nil
 	}
 
-	return normal, outliers
+	// Sort prices to compute quartiles (keep index mapping)
+	type indexed struct {
+		price float64
+		idx   int
+	}
+	items := make([]indexed, len(prices))
+	for i, p := range prices {
+		items[i] = indexed{p, i}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].price < items[j].price })
+
+	sortedPrices := make([]float64, len(items))
+	for i, item := range items {
+		sortedPrices[i] = item.price
+	}
+
+	mid := len(sortedPrices) / 2
+	q1 := median(sortedPrices[:mid])
+	var q3 float64
+	if len(sortedPrices)%2 == 0 {
+		q3 = median(sortedPrices[mid:])
+	} else {
+		q3 = median(sortedPrices[mid+1:])
+	}
+	iqr := q3 - q1
+
+	lower := q1 - multiplier*iqr
+	upper := q3 + multiplier*iqr
+
+	var clean []float64
+	var outliers []*JSONSale
+	for i, p := range prices {
+		if p < lower || p > upper {
+			outliers = append(outliers, sales[i])
+		} else {
+			clean = append(clean, p)
+		}
+	}
+
+	return clean, outliers
 }
 
 func SalesStatistics(addrs []*Address, sales []*JSONSale, stdf int) ([]*JSONSale, map[time.Time]Aggregation) {
@@ -91,21 +132,21 @@ func SalesStatistics(addrs []*Address, sales []*JSONSale, stdf int) ([]*JSONSale
 	for Y, g := range temp {
 		year, _ := time.Parse("2-1-2006", fmt.Sprintf("1-1-%d", Y))
 
-		if stdf > 0 && len(g.P) >= 3 {
-			// Two-pass outlier removal:
-			// Pass 1: compute initial stats and identify outliers
-			agg1 := AggregationFromPrices(g.P)
-			cleanPrices, outlz := SeperateOutliers(g.S, g.P, agg1, stdf)
+		if stdf > 0 && len(g.P) >= 4 {
+			// IQR-based outlier removal: robust against extreme values
+			// Use stdf to control sensitivity: stdf=1 → multiplier=1.5 (strict),
+			// stdf=2 → multiplier=2.0, stdf=3 → multiplier=2.5 (lenient)
+			multiplier := 1.0 + 0.5*float64(stdf)
+			cleanPrices, outlz := removeOutliersIQR(g.S, g.P, multiplier)
 
 			for _, ol := range outlz {
 				outliers[ol] = true
 			}
 
-			// Pass 2: recompute aggregation from cleaned data
 			if len(cleanPrices) > 0 {
 				out[year] = AggregationFromPrices(cleanPrices)
 			} else {
-				out[year] = agg1
+				out[year] = AggregationFromPrices(g.P)
 			}
 		} else {
 			out[year] = AggregationFromPrices(g.P)

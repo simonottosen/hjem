@@ -23,7 +23,8 @@ var (
 )
 
 type DAWAAddress struct {
-	FullText         string  `json:"betegnelse""`
+	UUID             string  `json:"id"`
+	FullText         string  `json:"betegnelse"`
 	StreetName       string  `json:"vejnavn"`
 	StreetNumber     string  `json:"husnr"`
 	Floor            *string `json:"etage"`
@@ -36,6 +37,7 @@ type DAWAAddress struct {
 
 type Address struct {
 	ID               uint    `json:"-" gorm:"primaryKey"`
+	DawaUUID         string  `json:"dawa_uuid" gorm:"not null"`
 	DawaID           string  `json:"full_txt" gorm:"not null;unique"`
 	StreetName       string  `json:"street_name" gorm:"not null"`
 	StreetNumber     string  `json:"street_number" gorm:"not null"`
@@ -292,6 +294,7 @@ func reqToAddrs(req *http.Request) ([]*Address, error) {
 	output := make([]*Address, len(temp))
 	for i, d := range temp {
 		output[i] = &Address{
+			DawaUUID:         d.UUID,
 			DawaID:           d.FullText,
 			StreetName:       d.StreetName,
 			StreetNumber:     d.StreetNumber,

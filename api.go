@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -118,6 +119,9 @@ func (s *server) handleLookup() http.HandlerFunc {
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
+
+		// Fetch Dingeo valuation for the primary address (non-blocking, non-fatal)
+		luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
 
 		replyJSON(w, luResp, http.StatusOK)
 	}
@@ -310,11 +314,13 @@ type LookupResponse struct {
 	Sales        []*JSONSale       `json:"sales"`
 	Ranges       map[int][]int     `json:"ranges,omitempty"`
 	SquareMeters SquareMeterPrices `json:"sqmeters"`
+	Valuation    *DingeoValuation  `json:"valuation,omitempty"`
 }
 
 type JSONSale struct {
 	AddrIndex int       `json:"addr_idx"`
 	Amount    int       `json:"amount"`
+	SqMeters  int       `json:"sq_meters"`
 	When      time.Time `json:"when"`
 }
 
@@ -330,6 +336,59 @@ func (s JSONSale) Headers() []string {
 		"amount_dkk",
 		"sold_date",
 	}
+}
+
+// filterBuildingSales removes whole-building transactions where the same total
+// price appears on multiple apartments at the same street+number on the same date.
+// These are bulk sales recorded per-apartment by Boliga, not real apartment prices.
+func filterBuildingSales(addrs []*Address, sales []*JSONSale) []*JSONSale {
+	// Group by (street+number, date, amount) → count of apartments
+	type key struct {
+		building string
+		date     string
+		amount   int
+	}
+	counts := map[key]int{}
+	for _, s := range sales {
+		if s.AddrIndex >= len(addrs) {
+			continue
+		}
+		addr := addrs[s.AddrIndex]
+		k := key{
+			building: addr.StreetName + " " + addr.StreetNumber,
+			date:     s.When.Format("2006-01-02"),
+			amount:   s.Amount,
+		}
+		counts[k]++
+	}
+
+	// Any group with 3+ apartments at the same price on the same date is a building sale
+	var filtered []*JSONSale
+	var removed int
+	for _, s := range sales {
+		if s.AddrIndex >= len(addrs) {
+			filtered = append(filtered, s)
+			continue
+		}
+		addr := addrs[s.AddrIndex]
+		k := key{
+			building: addr.StreetName + " " + addr.StreetNumber,
+			date:     s.When.Format("2006-01-02"),
+			amount:   s.Amount,
+		}
+		if counts[k] >= 3 && s.AddrIndex != 0 {
+			// Bulk building sale — skip (but keep primary address sales always)
+			removed++
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+
+	if removed > 0 {
+		log.Printf("Filtered %d whole-building sales from %d total", removed, len(sales))
+	}
+
+	return filtered
 }
 
 func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][]Sale, stdf int) (*LookupResponse, error) {
@@ -348,6 +407,7 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 				tempsales[k] = &JSONSale{
 					AddrIndex: i,
 					Amount:    sale.AmountDKK,
+					SqMeters:  sale.SqMeters,
 					When:      sale.Date,
 				}
 			}
@@ -372,6 +432,12 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 		r[meters] = ids
 	}
 	resp.Ranges = r
+
+	// Remove whole-building sales: when multiple apartments at the same
+	// street+number are recorded with identical price on the same date,
+	// it's a bulk/portfolio transaction where the total building price
+	// was assigned to every apartment. These distort per-apartment statistics.
+	resp.Sales = filterBuildingSales(resp.Addrs, resp.Sales)
 
 	normalSales, global := SalesStatistics(resp.Addrs, resp.Sales, stdf)
 	resp.Sales = normalSales
