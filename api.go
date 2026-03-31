@@ -241,6 +241,7 @@ var indexBytes []byte
 
 func (s *server) handleIndex() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexBytes)
 	}
 }
@@ -249,8 +250,8 @@ func (s *server) handleIndex() http.HandlerFunc {
 var bundleBytes []byte
 
 func (s *server) handleBundle() http.HandlerFunc {
-
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
 		w.Write(bundleBytes)
 	}
 }
