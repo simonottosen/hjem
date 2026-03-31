@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -52,7 +53,7 @@ type BoligaCacherResp struct {
 
 type BoligaCacher interface {
 	io.Closer
-	FetchSales([]*Address) ([][]Sale, error)
+	FetchSales([]*Address, *Progress) ([][]Sale, error)
 }
 
 type boligaCacher struct {
@@ -84,7 +85,7 @@ func (bc *boligaCacher) Close() error {
 
 const oneMonth time.Duration = time.Hour * 24 * 31
 
-func (bc *boligaCacher) FetchSales(addrs []*Address) ([][]Sale, error) {
+func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sale, error) {
 	cachedAddrs := map[int]*Address{}
 	fetchAddrs := map[int]*Address{}
 	var salesExpired []uint
@@ -122,10 +123,19 @@ func (bc *boligaCacher) FetchSales(addrs []*Address) ([][]Sale, error) {
 			i += 1
 		}
 
-		items, err := BoligaPropertiesFromAddrs(addrsToFetch)
+		items, err := BoligaPropertiesFromAddrs(addrsToFetch, progress)
 		if err != nil {
 			return nil, err
 		}
+
+		var totalProps int
+		for _, item := range items {
+			if item != nil {
+				totalProps++
+			}
+		}
+		var completedProps int
+		progress.Update(StageBoligaProp, fmt.Sprintf("Henter boligdetaljer: %d/%d", 0, totalProps), 0, totalProps)
 
 		var wg sync.WaitGroup
 		out := make(chan BoligaCacherResp)
@@ -159,6 +169,8 @@ func (bc *boligaCacher) FetchSales(addrs []*Address) ([][]Sale, error) {
 		var rerr error
 		for resp := range out {
 			wg.Done()
+			completedProps++
+			progress.Update(StageBoligaProp, fmt.Sprintf("Henter boligdetaljer: %d/%d", completedProps, totalProps), completedProps, totalProps)
 			if err := resp.err; err != nil {
 				rerr = err
 				cancel()
@@ -253,8 +265,8 @@ type BoligaSaleItem struct {
 	SqMeters         int          `json:"size"`
 	Rooms            float64      `json:"rooms"`
 	BuildYear        int          `json:"buildYear"`
-	Lattitude        float64      `json:"lattitude"`
-	Longtitude       float64      `json:"longtitude"`
+	Lattitude        float64      `json:"latitude"`
+	Longtitude       float64      `json:"longitude"`
 	ZipCode          int          `json:"zipCode"`
 	City             string       `json:"city"`
 	PriceChange      float64      `json:"change"`
@@ -270,7 +282,7 @@ type BoligaPageCrawl struct {
 	CreatedAt   time.Time
 }
 
-func BoligaPropertiesFromAddrs(addrs []*Address) ([]*BoligaSaleItem, error) {
+func BoligaPropertiesFromAddrs(addrs []*Address, progress *Progress) ([]*BoligaSaleItem, error) {
 	type K struct {
 		Municipality string
 		Street       string
@@ -296,20 +308,89 @@ func BoligaPropertiesFromAddrs(addrs []*Address) ([]*BoligaSaleItem, error) {
 		}
 	}
 
+	totalReqs := len(m)
+	var completedReqs int
 	var totalSales []BoligaSaleItem
 	for _, req := range m {
+		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+1, totalReqs), completedReqs, totalReqs)
 		s, err := req.Fetch()
 		if err != nil {
 			return nil, err
 		}
+		completedReqs++
 
 		totalSales = append(totalSales, s...)
 	}
+	log.Printf("Boliga total sales fetched: %d", len(totalSales))
 
 	z := map[string]int{}
 	for i, addr := range addrs {
 		z[addr.Short()] = i
 	}
+
+	log.Printf("Debug: z map has %d entries, totalSales has %d entries", len(z), len(totalSales))
+
+	// Find a Boliga address where DAWA also has the same street+number
+	if len(totalSales) > 0 {
+		for _, s := range totalSales {
+			parts := strings.SplitN(s.Addr, ",", 2)
+			if len(parts) == 0 {
+				continue
+			}
+			streetNum := strings.TrimSpace(parts[0])
+			for key := range z {
+				if strings.HasPrefix(key, streetNum) {
+					log.Printf("CLOSE PAIR found:")
+					log.Printf("  Boliga: %q (bytes: %x)", s.Addr, []byte(s.Addr))
+					log.Printf("  DAWA:   %q (bytes: %x)", key, []byte(key))
+					log.Printf("  Equal: %v", key == s.Addr)
+					goto debugDone
+				}
+			}
+		}
+		log.Printf("NO close pairs found at all! Dumping street+num combos:")
+		dawaStreetNums := map[string]bool{}
+		for key := range z {
+			parts := strings.SplitN(key, ",", 2)
+			if len(parts) > 0 {
+				dawaStreetNums[strings.TrimSpace(parts[0])] = true
+			}
+		}
+		boligaStreetNums := map[string]bool{}
+		for _, s := range totalSales {
+			parts := strings.SplitN(s.Addr, ",", 2)
+			if len(parts) > 0 {
+				boligaStreetNums[strings.TrimSpace(parts[0])] = true
+			}
+		}
+		log.Printf("  Sample DAWA street+nums (first 10):")
+		var dc int
+		for sn := range dawaStreetNums {
+			if dc >= 10 {
+				break
+			}
+			log.Printf("    %q", sn)
+			dc++
+		}
+		log.Printf("  Sample Boliga street+nums (first 10):")
+		var bc int
+		for sn := range boligaStreetNums {
+			if bc >= 10 {
+				break
+			}
+			log.Printf("    %q", sn)
+			bc++
+		}
+		// Check overlap
+		var overlap int
+		for sn := range boligaStreetNums {
+			if dawaStreetNums[sn] {
+				overlap++
+			}
+		}
+		log.Printf("  Street+num overlap: %d", overlap)
+	}
+debugDone:
 
 	var matches int
 
@@ -322,6 +403,7 @@ func BoligaPropertiesFromAddrs(addrs []*Address) ([]*BoligaSaleItem, error) {
 			props[j] = &s
 		}
 	}
+	log.Printf("Boliga matched %d/%d sales to addresses", matches, len(totalSales))
 
 	return props, nil
 }
@@ -371,17 +453,26 @@ func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
 		q.Set("page", strconv.Itoa(page))
 		req.URL.RawQuery = q.Encode()
 
+		log.Printf("Fetching Boliga sales: %s (page %d)", req.URL, page)
 		var sr BoligaSalesResponse
 		resp, err := DefaultClient.Do(req)
 		if err != nil {
+			log.Printf("Boliga request failed: %v", err)
 			return nil, err
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Boliga returned status %d", resp.StatusCode)
+			return nil, fmt.Errorf("boliga API returned status %d", resp.StatusCode)
+		}
+
 		if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+			log.Printf("Boliga decode failed: %v", err)
 			return nil, err
 		}
 
+		log.Printf("Boliga page %d/%d: %d sales", page, sr.Meta.TotalPages, len(sr.Sales))
 		sales = append(sales, sr.Sales...)
 		maxPages = sr.Meta.TotalPages
 		if page >= maxPages {
@@ -400,11 +491,18 @@ func PropertyFromBoligaItem(si BoligaSaleItem) (*BoligaProperty, error) {
 		si.EstateCode,
 		si.Guid,
 	)
+	log.Printf("Fetching Boliga property: %s", query)
 	resp, err := DefaultClient.Get(query)
 	if err != nil {
+		log.Printf("Boliga property request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Boliga property page returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("boliga property page returned status %d", resp.StatusCode)
+	}
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
@@ -425,6 +523,10 @@ func PropertyFromBoligaItem(si BoligaSaleItem) (*BoligaProperty, error) {
 			return nil, err
 		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("boliga listing page returned status %d", resp.StatusCode)
+		}
 
 		err := ReadListingToProperty(resp.Body, &prop)
 		if err != nil {

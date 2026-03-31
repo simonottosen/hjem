@@ -14,7 +14,7 @@ func init() {
 			next: &DefaultHeadersTripper{
 				next: http.DefaultTransport,
 				headers: map[string]string{
-					"User-Agent": "tpanum/hjem (github.com/tpanum/hjem)",
+					"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
 				},
 			},
 			maxRetries: 5,

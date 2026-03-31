@@ -31,13 +31,16 @@ func NewServer(db *gorm.DB) *server {
 	bc := NewBoligaCacher(db, 4)
 
 	return &server{
-		dc, bc,
+		dc:       dc,
+		bc:       bc,
+		progress: NewProgress(),
 	}
 }
 
 type server struct {
-	dc DawaCacher
-	bc BoligaCacher
+	dc       DawaCacher
+	bc       BoligaCacher
+	progress *Progress
 }
 
 func (s *server) handleLookup() http.HandlerFunc {
@@ -48,37 +51,46 @@ func (s *server) handleLookup() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		s.progress.Reset()
+
 		var req Request
 		body := http.MaxBytesReader(w, r.Body, maxBytesLimit)
 		defer body.Close()
 
 		err := json.NewDecoder(body).Decode(&req)
 		if err != nil {
+			s.progress.Update(StageError, err.Error(), 0, 0)
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
 
+		s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
 		addrs, err := s.dc.Do(DawaFuzzySearch{
 			Query: req.Query,
 		})
 		if err != nil {
+			s.progress.Update(StageError, err.Error(), 0, 0)
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
 
 		if len(addrs) > 1 {
+			s.progress.Update(StageError, "non-unique address", 0, 0)
 			replyJSONErr(w, fmt.Errorf("non-unique address, be more specific"), http.StatusBadRequest)
 			return
 		}
 
 		if len(addrs) == 0 {
+			s.progress.Update(StageError, "no found address", 0, 0)
 			replyJSONErr(w, fmt.Errorf("no found address"), http.StatusBadRequest)
 			return
 		}
 		addr := addrs[0]
 
+		s.progress.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
 		ranges, err := s.constructRanges(addr, req.Ranges)
 		if err != nil {
+			s.progress.Update(StageError, err.Error(), 0, 0)
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
@@ -87,16 +99,21 @@ func (s *server) handleLookup() http.HandlerFunc {
 			addrs = append(addrs, addrsInRange...)
 		}
 
-		sales, err := s.bc.FetchSales(addrs)
+		s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
+		sales, err := s.bc.FetchSales(addrs, s.progress)
 		if err != nil {
+			s.progress.Update(StageError, err.Error(), 0, 0)
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
 
 		addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
 
+		s.progress.Update(StageDone, "Færdig!", 0, 0)
+
 		luResp, err := FormatLookupResponse(addrs, ranges, sales, req.Filter)
 		if err != nil {
+			s.progress.Update(StageError, err.Error(), 0, 0)
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
@@ -149,7 +166,7 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			addrs = append(addrs, addrsInRange...)
 		}
 
-		sales, err := s.bc.FetchSales(addrs)
+		sales, err := s.bc.FetchSales(addrs, nil)
 		if err != nil {
 			// handle error
 		}
@@ -181,6 +198,39 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 	}
 }
 
+func (s *server) handleProgress() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Send initial snapshot
+		fmt.Fprintf(w, "data: %s\n\n", s.progress.SnapshotJSON())
+		flusher.Flush()
+
+		for {
+			select {
+			case <-s.progress.Wait():
+				snap := s.progress.Snapshot()
+				fmt.Fprintf(w, "data: %s\n\n", s.progress.SnapshotJSON())
+				flusher.Flush()
+
+				if snap.Stage == StageDone || snap.Stage == StageError {
+					return
+				}
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
+}
+
 //go:embed frontend/index.html
 var indexBytes []byte
 
@@ -205,6 +255,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/", s.handleIndex())
 	mux.HandleFunc("/dist/app.bundle.js", s.handleBundle())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
+	mux.HandleFunc("/api/progress", s.handleProgress())
 	mux.HandleFunc("/download/csv", s.handleCSVDownload())
 
 	return mux

@@ -21,6 +21,7 @@ func main() {
 	}
 
 	s := hjem.NewServer(db)
+	fmt.Printf("Server started on http://localhost:%d\n", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), s.Routes()); err != nil {
 		fmt.Println("Error starting server:", err)
 	}

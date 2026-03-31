@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -268,16 +269,25 @@ func reqToAddrs(req *http.Request) ([]*Address, error) {
 	q.Add("struktur", "mini")
 	req.URL.RawQuery = q.Encode()
 
+	log.Printf("Fetching DAWA: %s", req.URL)
 	resp, err := DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("DAWA request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("DAWA returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("DAWA API returned status %d", resp.StatusCode)
+	}
+
 	var temp []*DAWAAddress
 	if err := json.NewDecoder(resp.Body).Decode(&temp); err != nil {
+		log.Printf("DAWA decode failed: %v", err)
 		return nil, err
 	}
+	log.Printf("DAWA returned %d addresses", len(temp))
 
 	output := make([]*Address, len(temp))
 	for i, d := range temp {
