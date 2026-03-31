@@ -250,6 +250,12 @@ func (c dawaCacher) safeCreateOrGetAddrs(addrs []*Address) error {
 			continue
 		}
 
+		// Backfill DawaUUID if the cached record is missing it
+		if exsts.DawaUUID == "" && a.DawaUUID != "" {
+			exsts.DawaUUID = a.DawaUUID
+			c.db.Save(exsts)
+		}
+
 		addrs[i] = exsts
 	}
 

@@ -9,20 +9,31 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 export default function App() {
   const { data, isLoading, error, search } = useSearch();
   const { progress, connect, reset } = useProgress();
-  const [lastQuery, setLastQuery] = useState("");
-  const [lastRange, setLastRange] = useState(250);
+
+  // Form state lifted here so it survives layout changes
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("1");
+  const [range, setRange] = useState("250");
+
   const hasResults = !isLoading && !error && data?.addresses && data.addresses.length > 0;
 
-  const handleSearch = useCallback(
-    (query: string, range: number, filter: number) => {
-      setLastQuery(query);
-      setLastRange(range);
-      reset();
-      connect();
-      search(query, range, filter);
-    },
-    [search, connect, reset]
-  );
+  const handleSearch = useCallback(() => {
+    if (!query.trim()) return;
+    reset();
+    connect();
+    search(query, Number(range), Number(filter));
+  }, [query, range, filter, search, connect, reset]);
+
+  const searchFormProps = {
+    query,
+    filter,
+    range,
+    onQueryChange: setQuery,
+    onFilterChange: setFilter,
+    onRangeChange: setRange,
+    onSearch: handleSearch,
+    isLoading,
+  };
 
   // Before any search: centered landing page
   if (!hasResults && !isLoading && !error) {
@@ -40,7 +51,7 @@ export default function App() {
               og estimeret værdi for boligen og lokalområdet.
             </p>
           </div>
-          <SearchForm onSearch={handleSearch} isLoading={isLoading} />
+          <SearchForm {...searchFormProps} />
         </div>
       </div>
     );
@@ -55,7 +66,7 @@ export default function App() {
             <h1 className="text-lg font-bold tracking-tight">Hjem</h1>
           </div>
           <div className="flex-1">
-            <SearchForm onSearch={handleSearch} isLoading={isLoading} />
+            <SearchForm {...searchFormProps} />
           </div>
         </div>
 
@@ -66,8 +77,8 @@ export default function App() {
         {hasResults && (
           <DashboardLayout
             data={data!}
-            query={lastQuery}
-            range={lastRange}
+            query={query}
+            range={Number(range)}
           />
         )}
       </div>

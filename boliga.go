@@ -260,10 +260,16 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleI
 		}
 	}
 
-	var exactMatches, normMatches, buildingMatches int
+	var exactMatches, normMatches, buildingMatches, skippedSaleType int
 	result := make([][]BoligaSaleItem, len(addrs))
 	for i := range totalSales {
 		s := totalSales[i]
+
+		// Only include regular sales ("Alm. Salg"), skip family sales etc.
+		if s.SaleType != "Alm. Salg" {
+			skippedSaleType++
+			continue
+		}
 
 		// Try exact match first
 		if j, ok := z[s.Addr]; ok {
@@ -291,9 +297,10 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleI
 			continue
 		}
 	}
-	log.Printf("Boliga matched %d exact + %d normalized + %d building-level = %d/%d sales",
+	totalMatched := exactMatches + normMatches + buildingMatches
+	log.Printf("Boliga matched %d exact + %d normalized + %d building-level = %d/%d sales (skipped %d non-alm. salg)",
 		exactMatches, normMatches, buildingMatches,
-		exactMatches+normMatches+buildingMatches, len(totalSales))
+		totalMatched, len(totalSales), skippedSaleType)
 
 	return result, nil
 }

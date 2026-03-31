@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { type FormEvent } from "react";
 import { Search, Info } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -17,19 +17,30 @@ import {
 } from "@/components/ui/tooltip";
 
 interface SearchFormProps {
-  onSearch: (query: string, range: number, filter: number) => void;
+  query: string;
+  filter: string;
+  range: string;
+  onQueryChange: (value: string) => void;
+  onFilterChange: (value: string) => void;
+  onRangeChange: (value: string) => void;
+  onSearch: () => void;
   isLoading: boolean;
 }
 
-export function SearchForm({ onSearch, isLoading }: SearchFormProps) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("1");
-  const [range, setRange] = useState("250");
-
+export function SearchForm({
+  query,
+  filter,
+  range,
+  onQueryChange,
+  onFilterChange,
+  onRangeChange,
+  onSearch,
+  isLoading,
+}: SearchFormProps) {
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!query.trim()) return;
-    onSearch(query, Number(range), Number(filter));
+    onSearch();
   }
 
   return (
@@ -37,7 +48,7 @@ export function SearchForm({ onSearch, isLoading }: SearchFormProps) {
       <div className="flex gap-2">
         <Input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => onQueryChange(e.target.value)}
           placeholder="Adresse..."
           className="flex-1"
           disabled={isLoading}
@@ -66,7 +77,7 @@ export function SearchForm({ onSearch, isLoading }: SearchFormProps) {
               </Tooltip>
             </TooltipProvider>
           </label>
-          <Select value={filter} onValueChange={setFilter}>
+          <Select value={filter} onValueChange={onFilterChange}>
             <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
@@ -82,7 +93,7 @@ export function SearchForm({ onSearch, isLoading }: SearchFormProps) {
           <label className="text-xs text-muted-foreground font-medium">
             Område
           </label>
-          <Select value={range} onValueChange={setRange}>
+          <Select value={range} onValueChange={onRangeChange}>
             <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
