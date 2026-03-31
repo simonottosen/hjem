@@ -15,7 +15,7 @@ COPY app/ app/
 COPY --from=frontend /build/frontend/dist/ frontend/dist/
 COPY --from=frontend /build/frontend/index.html frontend/index.html
 WORKDIR /build/app
-RUN CGO_ENABLED=1 GOOS=linux go build -a -tags netgo -ldflags "-linkmode external -extldflags -static" -o hjem main.go
+RUN CGO_ENABLED=1 go build -ldflags "-s -w" -o hjem main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
