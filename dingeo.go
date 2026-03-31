@@ -40,9 +40,16 @@ func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
 		return nil, err
 	}
 
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9,da;q=0.8")
 	req.Header.Set("Origin", "https://www.boliga.dk")
 	req.Header.Set("Referer", "https://www.boliga.dk/")
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
 
 	log.Printf("Fetching Dingeo valuation for %s", dawaUUID)
 	resp, err := DefaultClient.Do(req)

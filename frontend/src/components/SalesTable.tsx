@@ -129,7 +129,7 @@ export function SalesTable({ data }: SalesTableProps) {
 
   return (
     <TooltipProvider>
-      <div className="min-w-[800px] max-h-[700px] overflow-y-auto">
+      <div className="min-w-[800px] max-h-[660px] overflow-y-auto">
         <Table>
           <TableHeader className="sticky top-0 bg-card z-10">
             <TableRow>
