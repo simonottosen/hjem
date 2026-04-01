@@ -3,6 +3,7 @@ package hjem
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -60,7 +61,16 @@ func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		log.Printf("Dingeo returned status %d", resp.StatusCode)
+		log.Printf("Dingeo response headers: %v", resp.Header)
+		if len(body) > 500 {
+			log.Printf("Dingeo response body (truncated): %s", string(body[:500]))
+		} else {
+			log.Printf("Dingeo response body: %s", string(body))
+		}
+		log.Printf("Dingeo request URL: %s", endpoint)
+		log.Printf("Dingeo request headers: %v", req.Header)
 		return nil, nil // non-fatal
 	}
 
