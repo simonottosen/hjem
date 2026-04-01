@@ -18,11 +18,12 @@ const (
 )
 
 type ProgressEvent struct {
-	Stage     ProgressStage `json:"stage"`
-	Message   string        `json:"message"`
-	Current   int           `json:"current"`
-	Total     int           `json:"total"`
-	ElapsedMs int64         `json:"elapsed_ms"`
+	Stage     ProgressStage  `json:"stage"`
+	Message   string         `json:"message"`
+	Current   int            `json:"current"`
+	Total     int            `json:"total"`
+	ElapsedMs int64          `json:"elapsed_ms"`
+	Result    interface{}    `json:"result,omitempty"`
 }
 
 type Progress struct {
@@ -32,6 +33,7 @@ type Progress struct {
 	current   int
 	total     int
 	startedAt time.Time
+	result    interface{}
 	notify    chan struct{}
 }
 
@@ -53,11 +55,16 @@ func (p *Progress) Update(stage ProgressStage, message string, current, total in
 	p.total = total
 	p.mu.Unlock()
 
-	// Non-blocking signal to wake SSE listeners
 	select {
 	case p.notify <- struct{}{}:
 	default:
 	}
+}
+
+func (p *Progress) SetResult(result interface{}) {
+	p.mu.Lock()
+	p.result = result
+	p.mu.Unlock()
 }
 
 func (p *Progress) Reset() {
@@ -66,6 +73,7 @@ func (p *Progress) Reset() {
 	p.message = ""
 	p.current = 0
 	p.total = 0
+	p.result = nil
 	p.startedAt = time.Now()
 	p.mu.Unlock()
 }
@@ -73,13 +81,18 @@ func (p *Progress) Reset() {
 func (p *Progress) Snapshot() ProgressEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return ProgressEvent{
+	evt := ProgressEvent{
 		Stage:     p.stage,
 		Message:   p.message,
 		Current:   p.current,
 		Total:     p.total,
 		ElapsedMs: time.Since(p.startedAt).Milliseconds(),
 	}
+	// Only include result when done
+	if p.stage == StageDone && p.result != nil {
+		evt.Result = p.result
+	}
+	return evt
 }
 
 func (p *Progress) SnapshotJSON() []byte {

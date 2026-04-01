@@ -1,10 +1,11 @@
-import type { LookupResponse } from "./types";
+import type { LookupResponse, ProgressEvent } from "./types";
 
-export async function searchLookup(
+// Start a lookup job on the server (returns immediately)
+export async function startLookup(
   query: string,
   range: number,
   filter: number
-): Promise<LookupResponse> {
+): Promise<void> {
   const resp = await fetch("/api/lookup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -15,11 +16,18 @@ export async function searchLookup(
     }),
   });
 
-  const data: LookupResponse = await resp.json();
-
-  if (data.error) {
-    throw new Error(data.error);
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || `Server error ${resp.status}`);
   }
+}
 
-  return data;
+// Poll progress (returns progress + result when done)
+export interface ProgressWithResult extends ProgressEvent {
+  result?: LookupResponse;
+}
+
+export async function fetchProgress(): Promise<ProgressWithResult> {
+  const resp = await fetch("/api/progress");
+  return resp.json();
 }

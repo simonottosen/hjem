@@ -66,65 +66,69 @@ func (s *server) handleLookup() http.HandlerFunc {
 			return
 		}
 
-		s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
-		addrs, err := s.dc.Do(DawaFuzzySearch{
-			Query: req.Query,
-		})
-		if err != nil {
-			s.progress.Update(StageError, err.Error(), 0, 0)
-			replyJSONErr(w, err, http.StatusBadRequest)
-			return
-		}
+		// Run the lookup in a background goroutine so the HTTP response
+		// returns immediately. The frontend polls /api/progress for status
+		// and the result. This avoids Cloudflare tunnel timeouts.
+		go s.runLookup(req.Query, req.Ranges, req.Filter)
 
-		if len(addrs) > 1 {
-			s.progress.Update(StageError, "non-unique address", 0, 0)
-			replyJSONErr(w, fmt.Errorf("non-unique address, be more specific"), http.StatusBadRequest)
-			return
-		}
-
-		if len(addrs) == 0 {
-			s.progress.Update(StageError, "no found address", 0, 0)
-			replyJSONErr(w, fmt.Errorf("no found address"), http.StatusBadRequest)
-			return
-		}
-		addr := addrs[0]
-
-		s.progress.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
-		ranges, err := s.constructRanges(addr, req.Ranges)
-		if err != nil {
-			s.progress.Update(StageError, err.Error(), 0, 0)
-			replyJSONErr(w, err, http.StatusBadRequest)
-			return
-		}
-
-		for _, addrsInRange := range ranges {
-			addrs = append(addrs, addrsInRange...)
-		}
-
-		s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
-		sales, err := s.bc.FetchSales(addrs, s.progress)
-		if err != nil {
-			s.progress.Update(StageError, err.Error(), 0, 0)
-			replyJSONErr(w, err, http.StatusBadRequest)
-			return
-		}
-
-		addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
-
-		s.progress.Update(StageDone, "Færdig!", 0, 0)
-
-		luResp, err := FormatLookupResponse(addrs, ranges, sales, req.Filter)
-		if err != nil {
-			s.progress.Update(StageError, err.Error(), 0, 0)
-			replyJSONErr(w, err, http.StatusBadRequest)
-			return
-		}
-
-		// Fetch Dingeo valuation for the primary address (non-blocking, non-fatal)
-		luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
-
-		replyJSON(w, luResp, http.StatusOK)
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 	}
+}
+
+func (s *server) runLookup(query string, ranges []int, filter int) {
+	s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
+	addrs, err := s.dc.Do(DawaFuzzySearch{
+		Query: query,
+	})
+	if err != nil {
+		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+
+	if len(addrs) > 1 {
+		s.progress.Update(StageError, "non-unique address, be more specific", 0, 0)
+		return
+	}
+
+	if len(addrs) == 0 {
+		s.progress.Update(StageError, "no found address", 0, 0)
+		return
+	}
+	addr := addrs[0]
+
+	s.progress.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
+	rangeMap, err := s.constructRanges(addr, ranges)
+	if err != nil {
+		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+
+	for _, addrsInRange := range rangeMap {
+		addrs = append(addrs, addrsInRange...)
+	}
+
+	s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
+	sales, err := s.bc.FetchSales(addrs, s.progress)
+	if err != nil {
+		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+
+	addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
+
+	luResp, err := FormatLookupResponse(addrs, rangeMap, sales, filter)
+	if err != nil {
+		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+
+	// Fetch Dingeo valuation (non-fatal)
+	luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
+
+	// Store result and mark done
+	s.progress.SetResult(luResp)
+	s.progress.Update(StageDone, "Færdig!", 0, 0)
 }
 
 func (s *server) handleCSVDownload() http.HandlerFunc {
@@ -205,34 +209,9 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 
 func (s *server) handleProgress() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming not supported", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		// Send initial snapshot
-		fmt.Fprintf(w, "data: %s\n\n", s.progress.SnapshotJSON())
-		flusher.Flush()
-
-		for {
-			select {
-			case <-s.progress.Wait():
-				snap := s.progress.Snapshot()
-				fmt.Fprintf(w, "data: %s\n\n", s.progress.SnapshotJSON())
-				flusher.Flush()
-
-				if snap.Stage == StageDone || snap.Stage == StageError {
-					return
-				}
-			case <-r.Context().Done():
-				return
-			}
-		}
+		w.Write(s.progress.SnapshotJSON())
 	}
 }
 

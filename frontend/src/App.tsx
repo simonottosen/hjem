@@ -1,5 +1,12 @@
 import { useState, useCallback } from "react";
 import { Github } from "lucide-react";
+import { useSearch } from "@/hooks/useSearch";
+import { useProgress } from "@/hooks/useProgress";
+import { useFilteredData } from "@/hooks/useFilteredData";
+import { SearchForm } from "@/components/SearchForm";
+import { ProgressBar } from "@/components/ProgressBar";
+import { ErrorAlert } from "@/components/ErrorAlert";
+import { DashboardLayout } from "@/components/DashboardLayout";
 
 function Footer() {
   return (
@@ -19,17 +26,10 @@ function Footer() {
     </footer>
   );
 }
-import { useSearch } from "@/hooks/useSearch";
-import { useProgress } from "@/hooks/useProgress";
-import { useFilteredData } from "@/hooks/useFilteredData";
-import { SearchForm } from "@/components/SearchForm";
-import { ProgressBar } from "@/components/ProgressBar";
-import { ErrorAlert } from "@/components/ErrorAlert";
-import { DashboardLayout } from "@/components/DashboardLayout";
 
 export default function App() {
-  const { data, isLoading, error, search } = useSearch();
-  const { progress, connect, reset } = useProgress();
+  const { data, isLoading, error, search, setResult, setSearchError } = useSearch();
+  const { progress, startPolling, reset } = useProgress();
 
   // Form state lifted here so it survives layout changes
   const [query, setQuery] = useState("");
@@ -59,11 +59,13 @@ export default function App() {
 
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
-    setExcludedAddrs(new Set()); // reset exclusions on new search
+    setExcludedAddrs(new Set());
     reset();
-    connect();
-    search(query, Number(range), Number(filter));
-  }, [query, range, filter, search, connect, reset]);
+    search(query, Number(range), Number(filter), () => {
+      // POST accepted — start polling for progress + result
+      startPolling(setResult, setSearchError);
+    });
+  }, [query, range, filter, search, reset, startPolling, setResult, setSearchError]);
 
   const searchFormProps = {
     query,

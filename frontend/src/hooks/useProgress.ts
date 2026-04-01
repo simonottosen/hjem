@@ -1,55 +1,59 @@
 import { useState, useCallback, useRef } from "react";
-import type { ProgressEvent } from "@/lib/types";
+import type { ProgressEvent, LookupResponse } from "@/lib/types";
+import { fetchProgress } from "@/lib/api";
+
+const POLL_INTERVAL_MS = 2000;
 
 export function useProgress() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
-  const sourceRef = useRef<EventSource | null>(null);
-  const seenActiveRef = useRef(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onResultRef = useRef<((data: LookupResponse) => void) | null>(null);
+  const onErrorRef = useRef<((msg: string) => void) | null>(null);
 
-  const connect = useCallback(() => {
-    disconnect();
-    seenActiveRef.current = false;
-    const es = new EventSource("/api/progress");
-    sourceRef.current = es;
-
-    es.onmessage = (event) => {
-      const data: ProgressEvent = JSON.parse(event.data);
-
-      // Ignore stale "done"/"idle" events that arrive before the new
-      // search has started on the server. Only start trusting events
-      // once we see an active stage (dawa, boliga_list, etc.).
-      if (!seenActiveRef.current) {
-        if (data.stage === "done" || data.stage === "idle" || data.stage === "error") {
-          return; // stale from previous search — skip
-        }
-        seenActiveRef.current = true;
-      }
-
-      setProgress(data);
-
-      if (data.stage === "done" || data.stage === "error") {
-        es.close();
-        sourceRef.current = null;
-      }
-    };
-
-    es.onerror = () => {
-      es.close();
-      sourceRef.current = null;
-    };
-  }, []);
-
-  const disconnect = useCallback(() => {
-    if (sourceRef.current) {
-      sourceRef.current.close();
-      sourceRef.current = null;
+  const stop = useCallback(() => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
   }, []);
 
-  const reset = useCallback(() => {
-    setProgress(null);
-    seenActiveRef.current = false;
-  }, []);
+  const startPolling = useCallback(
+    (
+      onResult: (data: LookupResponse) => void,
+      onError: (msg: string) => void
+    ) => {
+      stop();
+      onResultRef.current = onResult;
+      onErrorRef.current = onError;
 
-  return { progress, connect, disconnect, reset };
+      const poll = async () => {
+        try {
+          const data = await fetchProgress();
+          setProgress(data);
+
+          if (data.stage === "done" && data.result) {
+            stop();
+            onResultRef.current?.(data.result as LookupResponse);
+          } else if (data.stage === "error") {
+            stop();
+            onErrorRef.current?.(data.message || "Ukendt fejl");
+          }
+        } catch {
+          // Network error during poll — keep trying
+        }
+      };
+
+      // Poll immediately, then on interval
+      poll();
+      intervalRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    },
+    [stop]
+  );
+
+  const reset = useCallback(() => {
+    stop();
+    setProgress(null);
+  }, [stop]);
+
+  return { progress, startPolling, reset };
 }

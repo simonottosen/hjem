@@ -28,6 +28,12 @@ const errorTranslations: Record<string, string> = {
   "non-unique address":
     "Der findes flere adresser med den beskrivelse, vær mere præcis",
   "no found address": "Kunne ikke finde nogen adresser udfra den søgning",
+  "forbindelsen":
+    "Forbindelsen til serveren blev afbrudt. Prøv igen — det kan tage op til 5 minutter at hente alle salgsdata.",
+  "load failed":
+    "Forbindelsen til serveren blev afbrudt. Prøv igen — det kan tage op til 5 minutter at hente alle salgsdata.",
+  "network":
+    "Netværksfejl. Tjek din forbindelse og prøv igen.",
 };
 
 export function translateError(error: string): string {
