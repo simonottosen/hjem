@@ -19,12 +19,18 @@ import { ArrowUpDown, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 interface SalesTableProps {
   data: LookupResponse;
+  excludedAddrs: Set<number>;
+  onToggleExcluded: (addrIdx: number) => void;
 }
 
 type SortKey = "address" | "amount" | "sqmPrice" | "vsAvg" | "date" | "size" | "year" | "rooms";
 type SortDir = "asc" | "desc";
 
-export function SalesTable({ data }: SalesTableProps) {
+export function SalesTable({
+  data,
+  excludedAddrs,
+  onToggleExcluded,
+}: SalesTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
@@ -49,7 +55,6 @@ export function SalesTable({ data }: SalesTableProps) {
       const size = s.sq_meters > 0 ? s.sq_meters : (addr?.building_size ?? 0);
       const sqmPrice = size > 0 ? Math.round(s.amount / size) : null;
 
-      // % difference from area average for that year
       const saleYear = new Date(s.when).getFullYear();
       const areaAvg = yearMeanMap[saleYear];
       const vsAvg =
@@ -57,7 +62,9 @@ export function SalesTable({ data }: SalesTableProps) {
           ? ((sqmPrice - areaAvg) / areaAvg) * 100
           : null;
 
-      return { ...s, addr, sqmPrice, size, vsAvg };
+      const excluded = excludedAddrs.has(s.addr_idx);
+
+      return { ...s, addr, sqmPrice, size, vsAvg, excluded };
     });
 
     items.sort((a, b) => {
@@ -96,7 +103,7 @@ export function SalesTable({ data }: SalesTableProps) {
     });
 
     return items;
-  }, [sales, addrs, sortKey, sortDir, yearMeanMap]);
+  }, [sales, addrs, sortKey, sortDir, yearMeanMap, excludedAddrs]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
@@ -129,10 +136,11 @@ export function SalesTable({ data }: SalesTableProps) {
 
   return (
     <TooltipProvider>
-      <div className="min-w-[800px] max-h-[660px] overflow-y-auto">
+      <div className="min-w-[850px] max-h-[660px] overflow-y-auto">
         <Table>
           <TableHeader className="sticky top-0 bg-card z-10">
             <TableRow>
+              <TableHead className="w-[32px]" />
               <SortHeader label="Adresse" sortId="address" />
               <SortHeader label="Salgspris" sortId="amount" />
               <SortHeader label="kr/m²" sortId="sqmPrice" />
@@ -145,6 +153,7 @@ export function SalesTable({ data }: SalesTableProps) {
           </TableHeader>
           <TableBody>
             {sorted.map((s, i) => {
+              const isPrimary = s.addr_idx === data.primary_idx;
               const primaryValue =
                 s.sqmPrice != null && primarySize > 0
                   ? s.sqmPrice * primarySize
@@ -154,12 +163,28 @@ export function SalesTable({ data }: SalesTableProps) {
                 <TableRow
                   key={i}
                   className={
-                    s.addr_idx === data.primary_idx
+                    isPrimary
                       ? "bg-chart-1/10 hover:bg-chart-1/20"
-                      : ""
+                      : s.excluded
+                        ? "opacity-40"
+                        : ""
                   }
                 >
-                  <TableCell className="max-w-[200px] truncate text-xs">
+                  <TableCell className="w-[32px] px-1">
+                    {!isPrimary && (
+                      <input
+                        type="checkbox"
+                        checked={!s.excluded}
+                        onChange={() => onToggleExcluded(s.addr_idx)}
+                        className="size-3.5 rounded border-input accent-primary cursor-pointer"
+                      />
+                    )}
+                  </TableCell>
+                  <TableCell
+                    className={`max-w-[200px] truncate text-xs ${
+                      s.excluded ? "line-through" : ""
+                    }`}
+                  >
                     {s.addr?.full_txt ?? "—"}
                   </TableCell>
                   <TableCell className="font-mono text-xs">

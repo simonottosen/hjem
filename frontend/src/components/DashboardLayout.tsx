@@ -15,12 +15,16 @@ interface DashboardLayoutProps {
   data: LookupResponse;
   query: string;
   range: number;
+  excludedAddrs: Set<number>;
+  onToggleExcluded: (addrIdx: number) => void;
 }
 
 export function DashboardLayout({
   data,
   query,
   range,
+  excludedAddrs,
+  onToggleExcluded,
 }: DashboardLayoutProps) {
   return (
     <div className="space-y-4">
@@ -50,11 +54,22 @@ export function DashboardLayout({
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-sm">Salgsdata</CardTitle>
+          <CardTitle className="text-sm">
+            Salgsdata
+            {excludedAddrs.size > 0 && (
+              <span className="text-xs font-normal text-muted-foreground ml-2">
+                ({excludedAddrs.size} adresser ekskluderet)
+              </span>
+            )}
+          </CardTitle>
           <CsvDownloadButton query={query} range={range} />
         </CardHeader>
         <CardContent className="overflow-x-auto">
-          <SalesTable data={data} />
+          <SalesTable
+            data={data}
+            excludedAddrs={excludedAddrs}
+            onToggleExcluded={onToggleExcluded}
+          />
         </CardContent>
       </Card>
     </div>

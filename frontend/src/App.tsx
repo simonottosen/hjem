@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { useSearch } from "@/hooks/useSearch";
 import { useProgress } from "@/hooks/useProgress";
+import { useFilteredData } from "@/hooks/useFilteredData";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressBar } from "@/components/ProgressBar";
 import { ErrorAlert } from "@/components/ErrorAlert";
@@ -15,10 +16,30 @@ export default function App() {
   const [filter, setFilter] = useState("1");
   const [range, setRange] = useState("250");
 
-  const hasResults = !isLoading && !error && data?.addresses && data.addresses.length > 0;
+  // Address exclusion state
+  const [excludedAddrs, setExcludedAddrs] = useState<Set<number>>(new Set());
+
+  const toggleExcluded = useCallback((addrIdx: number) => {
+    setExcludedAddrs((prev) => {
+      const next = new Set(prev);
+      if (next.has(addrIdx)) {
+        next.delete(addrIdx);
+      } else {
+        next.add(addrIdx);
+      }
+      return next;
+    });
+  }, []);
+
+  // Filtered + recomputed data
+  const filteredData = useFilteredData(data, excludedAddrs);
+
+  const hasResults =
+    !isLoading && !error && filteredData?.addresses && filteredData.addresses.length > 0;
 
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
+    setExcludedAddrs(new Set()); // reset exclusions on new search
     reset();
     connect();
     search(query, Number(range), Number(filter));
@@ -76,9 +97,11 @@ export default function App() {
 
         {hasResults && (
           <DashboardLayout
-            data={data!}
+            data={filteredData!}
             query={query}
             range={Number(range)}
+            excludedAddrs={excludedAddrs}
+            onToggleExcluded={toggleExcluded}
           />
         )}
       </div>
