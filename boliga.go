@@ -48,7 +48,7 @@ func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 	return &boligaCacher{db}
 }
 
-const oneMonth time.Duration = time.Hour * 24 * 31
+const cacheExpiry time.Duration = time.Hour * 24 * 10 // 10 days
 
 func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sale, error) {
 	cachedAddrs := map[int]*Address{}
@@ -61,7 +61,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 			continue
 		}
 
-		if time.Now().Sub(addr.BoligaCollectedAt) >= oneMonth {
+		if time.Now().Sub(addr.BoligaCollectedAt) >= cacheExpiry {
 			fetchAddrs[i] = addr
 			salesExpired = append(salesExpired, addr.ID)
 			continue
