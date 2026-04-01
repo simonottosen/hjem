@@ -70,8 +70,11 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 		cachedAddrs[i] = addr
 	}
 
+	log.Printf("Boliga cache: %d cached, %d to fetch, %d expired (of %d total addresses)",
+		len(cachedAddrs), len(fetchAddrs), len(salesExpired), len(addrs))
+
 	if len(salesExpired) > 0 {
-		bc.db.Delete(&Sale{}, salesExpired)
+		bc.db.Where("addr_id IN ?", salesExpired).Delete(&Sale{})
 	}
 
 	sales := make([][]Sale, len(addrs))
@@ -137,8 +140,20 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 			}
 		}
 
-		if err := bc.db.CreateInBatches(&salesToStore, 50).Error; err != nil {
-			return nil, err
+		if len(salesToStore) > 0 {
+			if err := bc.db.CreateInBatches(&salesToStore, 50).Error; err != nil {
+				return nil, err
+			}
+		}
+
+		// Mark ALL fetched addresses as checked — even those without matches.
+		// Without this, unmatched addresses (BoligaCollectedAt stays zero) trigger
+		// a full re-fetch of their entire street on every subsequent search.
+		for _, addr := range addrsToFetch {
+			if addr.BoligaCollectedAt.IsZero() {
+				addr.BoligaCollectedAt = fetchTime
+				bc.db.Save(addr)
+			}
 		}
 	}
 
