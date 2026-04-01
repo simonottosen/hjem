@@ -310,18 +310,21 @@ type SquareMeterPrices struct {
 }
 
 type LookupResponse struct {
-	PrimaryIndex int               `json:"primary_idx"`
-	Addrs        []*Address        `json:"addresses"`
-	Sales        []*JSONSale       `json:"sales"`
-	Ranges       map[int][]int     `json:"ranges,omitempty"`
-	SquareMeters SquareMeterPrices `json:"sqmeters"`
-	Valuation    *DingeoValuation  `json:"valuation,omitempty"`
+	PrimaryIndex  int               `json:"primary_idx"`
+	Addrs         []*Address        `json:"addresses"`
+	Sales         []*JSONSale       `json:"sales"`
+	Ranges        map[int][]int     `json:"ranges,omitempty"`
+	SquareMeters  SquareMeterPrices `json:"sqmeters"`
+	Valuation     *DingeoValuation  `json:"valuation,omitempty"`
+	CompsEstimate *CompsEstimate    `json:"comps_estimate,omitempty"`
 }
 
 type JSONSale struct {
 	AddrIndex int       `json:"addr_idx"`
 	Amount    int       `json:"amount"`
 	SqMeters  int       `json:"sq_meters"`
+	Rooms     int       `json:"rooms"`
+	BuildYear int       `json:"build_year"`
 	When      time.Time `json:"when"`
 }
 
@@ -409,6 +412,8 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 					AddrIndex: i,
 					Amount:    sale.AmountDKK,
 					SqMeters:  sale.SqMeters,
+					Rooms:     sale.Rooms,
+					BuildYear: sale.BuildYear,
 					When:      sale.Date,
 				}
 			}
@@ -478,6 +483,11 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 		}
 	}
 	resp.SquareMeters.Projections = projections
+
+	// Comparable sales estimate
+	if len(resp.Addrs) > 0 {
+		resp.CompsEstimate = ComputeCompsEstimate(resp.Addrs[0], resp.Addrs, resp.Sales, global)
+	}
 
 	return &resp, nil
 }

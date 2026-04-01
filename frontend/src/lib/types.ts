@@ -21,6 +21,8 @@ export interface Sale {
   addr_idx: number;
   amount: number;
   sq_meters: number;
+  rooms: number;
+  build_year: number;
   when: string; // ISO 8601
 }
 
@@ -52,6 +54,15 @@ export interface DingeoValuation {
   countEvals: number;
 }
 
+export interface CompsEstimate {
+  value: number;
+  sqm_price: number;
+  low: number;
+  high: number;
+  confidence: "high" | "medium" | "low";
+  num_comps: number;
+}
+
 export interface LookupResponse {
   primary_idx: number;
   addresses: Address[] | null;
@@ -59,6 +70,7 @@ export interface LookupResponse {
   ranges: Record<number, number[]> | null;
   sqmeters: SquareMeterPrices;
   valuation?: DingeoValuation | null;
+  comps_estimate?: CompsEstimate | null;
   error?: string;
 }
 

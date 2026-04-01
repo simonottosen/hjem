@@ -28,6 +28,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
   const sales = data.sales ?? [];
   const primary = addrs[data.primary_idx];
   const valuation = data.valuation;
+  const comps = data.comps_estimate;
 
   // Primary address sales (sorted newest first)
   const primarySales = useMemo(() => {
@@ -94,11 +95,17 @@ export function MetricsRow({ data }: MetricsRowProps) {
     return null;
   }, [data.sqmeters, primary, latest]);
 
-  // % change from last sale to estimated value
+  // % change from last sale to estimated value (simple)
   const estimatePctChange = useMemo(() => {
     if (!sqmProjectedValue || !lastSale || lastSale.amount === 0) return null;
     return ((sqmProjectedValue.value - lastSale.amount) / lastSale.amount) * 100;
   }, [sqmProjectedValue, lastSale]);
+
+  // % change from last sale to comps estimate
+  const compsPctChange = useMemo(() => {
+    if (!comps || !lastSale || lastSale.amount === 0) return null;
+    return ((comps.value - lastSale.amount) / lastSale.amount) * 100;
+  }, [comps, lastSale]);
 
   return (
     <div className="space-y-3">
@@ -170,7 +177,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
           </CardContent>
         </Card>
 
-        {/* Card 3: Estimated value + % change from last sale */}
+        {/* Card 3: Estimated value — comps primary, simple secondary */}
         <Card className="py-4">
           <CardHeader className="pb-1 px-4">
             <CardTitle className="text-xs text-muted-foreground flex items-center gap-1">
@@ -179,7 +186,26 @@ export function MetricsRow({ data }: MetricsRowProps) {
             </CardTitle>
           </CardHeader>
           <CardContent className="px-4 space-y-2">
-            {sqmProjectedValue ? (
+            {/* Comps estimate (primary) */}
+            {comps ? (
+              <div>
+                <div className="flex items-baseline gap-2">
+                  <p className="text-2xl font-bold">
+                    ~{formatDKK(comps.value)}
+                  </p>
+                  <Badge
+                    variant={comps.confidence === "high" ? "default" : comps.confidence === "medium" ? "secondary" : "outline"}
+                    className="text-[10px]"
+                  >
+                    {comps.confidence === "high" ? "Høj" : comps.confidence === "medium" ? "Middel" : "Lav"} tillid
+                  </Badge>
+                  {compsPctChange != null && <PctBadge pct={compsPctChange} />}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {formatDKK(comps.low)}–{formatDKK(comps.high)} ({comps.num_comps} sammenlignelige)
+                </p>
+              </div>
+            ) : sqmProjectedValue ? (
               <div>
                 <div className="flex items-baseline gap-2">
                   <p className="text-2xl font-bold">
@@ -190,25 +216,24 @@ export function MetricsRow({ data }: MetricsRowProps) {
                 <p className="text-xs text-muted-foreground">
                   {sqmProjectedValue.sqmPrice.toLocaleString("da-DK")} kr/m² × {primary.building_size} m²
                 </p>
-                {estimatePctChange != null && lastSale && (
-                  <p className="text-xs text-muted-foreground">
-                    siden salg i {new Date(lastSale.when).getFullYear()}
-                  </p>
-                )}
-              </div>
-            ) : latest ? (
-              <div>
-                <p className="text-2xl font-bold">
-                  {formatDKK(latest[1].mean)}
-                  <span className="text-sm font-normal text-muted-foreground"> /m²</span>
-                </p>
               </div>
             ) : (
               <p className="text-muted-foreground">—</p>
             )}
 
-            {valuation && valuation.mean > 0 && (
+            {/* Simple m² estimate (secondary, when comps is primary) */}
+            {comps && sqmProjectedValue && (
               <div className="border-t pt-1.5">
+                <p className="text-xs text-muted-foreground">
+                  Simpel m²: ~{formatDKK(sqmProjectedValue.value)}{" "}
+                  ({sqmProjectedValue.sqmPrice.toLocaleString("da-DK")} kr/m²)
+                </p>
+              </div>
+            )}
+
+            {/* Dingeo range */}
+            {valuation && valuation.mean > 0 && (
+              <div className={comps && sqmProjectedValue ? "" : "border-t pt-1.5"}>
                 <p className="text-xs text-muted-foreground">
                   Dingeo: {formatDKK(valuation.minVal)}–{formatDKK(valuation.maxVal)}
                 </p>

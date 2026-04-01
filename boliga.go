@@ -106,6 +106,8 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 					AddrID:    addr.ID,
 					AmountDKK: item.AmountDKK,
 					SqMeters:  item.SqMeters,
+					Rooms:     int(item.Rooms),
+					BuildYear: item.BuildYear,
 					Date:      item.SoldDate,
 				}
 			}
@@ -166,6 +168,8 @@ type Sale struct {
 	AddrID    uint      `json:"-"`
 	AmountDKK int       `json:"amount"`
 	SqMeters  int       `json:"sq_meters"`
+	Rooms     int       `json:"rooms"`
+	BuildYear int       `json:"build_year"`
 	Date      time.Time `json:"time"`
 }
 
