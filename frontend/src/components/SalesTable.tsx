@@ -15,7 +15,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { ArrowUpDown, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { ArrowUpDown, ArrowUpRight, ArrowDownRight, Info } from "lucide-react";
 
 interface SalesTableProps {
   data: LookupResponse;
@@ -117,9 +117,11 @@ export function SalesTable({
   function SortHeader({
     label,
     sortId,
+    info,
   }: {
     label: string;
     sortId: SortKey;
+    info?: string;
   }) {
     return (
       <TableHead
@@ -128,6 +130,21 @@ export function SalesTable({
       >
         <span className="inline-flex items-center gap-1">
           {label}
+          {info && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  className="inline-flex items-center justify-center size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Info className="size-2.5" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-[220px] text-xs font-normal">
+                {info}
+              </TooltipContent>
+            </Tooltip>
+          )}
           <ArrowUpDown className="size-3 text-muted-foreground" />
         </span>
       </TableHead>
@@ -143,8 +160,8 @@ export function SalesTable({
               <TableHead className="w-[32px]" />
               <SortHeader label="Adresse" sortId="address" />
               <SortHeader label="Salgspris" sortId="amount" />
-              <SortHeader label="kr/m²" sortId="sqmPrice" />
-              <SortHeader label="vs. gns." sortId="vsAvg" />
+              <SortHeader label="kr/m²" sortId="sqmPrice" info="Salgspris divideret med boligens størrelse i kvadratmeter." />
+              <SortHeader label="vs. gns." sortId="vsAvg" info="Procentvis afvigelse fra områdets gennemsnitlige m²-pris det år boligen blev solgt." />
               <SortHeader label="Dato" sortId="date" />
               <SortHeader label="m²" sortId="size" />
               <SortHeader label="Byggeår" sortId="year" />

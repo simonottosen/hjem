@@ -13,6 +13,7 @@ import {
 
 interface DashboardLayoutProps {
   data: LookupResponse;
+  rawData: LookupResponse;
   query: string;
   range: number;
   excludedAddrs: Set<number>;
@@ -21,6 +22,7 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({
   data,
+  rawData,
   query,
   range,
   excludedAddrs,
@@ -66,7 +68,7 @@ export function DashboardLayout({
         </CardHeader>
         <CardContent className="overflow-x-auto">
           <SalesTable
-            data={data}
+            data={rawData}
             excludedAddrs={excludedAddrs}
             onToggleExcluded={onToggleExcluded}
           />

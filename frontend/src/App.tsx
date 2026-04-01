@@ -1,4 +1,24 @@
 import { useState, useCallback } from "react";
+import { Github } from "lucide-react";
+
+function Footer() {
+  return (
+    <footer className="border-t mt-8 py-4 text-center text-xs text-muted-foreground">
+      <p>
+        Lavet af Simon Ottosen, baseret på det oprindelige arbejde af Thomas Panum
+      </p>
+      <a
+        href="https://github.com/simonottosen/hjem"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 mt-1 hover:text-foreground transition-colors"
+      >
+        <Github className="size-3" />
+        github.com/simonottosen/hjem
+      </a>
+    </footer>
+  );
+}
 import { useSearch } from "@/hooks/useSearch";
 import { useProgress } from "@/hooks/useProgress";
 import { useFilteredData } from "@/hooks/useFilteredData";
@@ -73,6 +93,7 @@ export default function App() {
             </p>
           </div>
           <SearchForm {...searchFormProps} />
+          <Footer />
         </div>
       </div>
     );
@@ -98,12 +119,15 @@ export default function App() {
         {hasResults && (
           <DashboardLayout
             data={filteredData!}
+            rawData={data!}
             query={query}
             range={Number(range)}
             excludedAddrs={excludedAddrs}
             onToggleExcluded={toggleExcluded}
           />
         )}
+
+        <Footer />
       </div>
     </div>
   );
