@@ -1,4 +1,4 @@
-import type { LookupResponse, ProgressEvent } from "./types";
+import type { ProgressEvent } from "./types";
 
 // Start a lookup job on the server (returns immediately)
 export async function startLookup(
@@ -18,16 +18,20 @@ export async function startLookup(
 
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
+    console.error("[hjem] Lookup request failed:", { status: resp.status, error: data.error });
     throw new Error(data.error || `Server error ${resp.status}`);
   }
 }
 
 // Poll progress (returns progress + result when done)
-export interface ProgressWithResult extends ProgressEvent {
-  result?: LookupResponse;
-}
-
-export async function fetchProgress(): Promise<ProgressWithResult> {
+export async function fetchProgress(): Promise<ProgressEvent> {
   const resp = await fetch("/api/progress");
-  return resp.json();
+  if (!resp.ok) {
+    console.warn("[hjem] Progress poll failed:", { status: resp.status });
+  }
+  const data: ProgressEvent = await resp.json();
+  if (data.warnings?.length) {
+    console.warn("[hjem] Lookup warnings:", data.warnings);
+  }
+  return data;
 }

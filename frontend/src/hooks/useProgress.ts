@@ -33,13 +33,19 @@ export function useProgress() {
 
           if (data.stage === "done" && data.result) {
             stop();
-            onResultRef.current?.(data.result as LookupResponse);
+            const result = data.result as LookupResponse;
+            // Attach warnings from progress to the result
+            if (data.warnings?.length) {
+              result.warnings = data.warnings;
+            }
+            onResultRef.current?.(result);
           } else if (data.stage === "error") {
             stop();
             onErrorRef.current?.(data.message || "Ukendt fejl");
           }
-        } catch {
-          // Network error during poll — keep trying
+        } catch (err) {
+          console.warn("[hjem] Progress poll failed:", err);
+          // Keep polling — transient network error
         }
       };
 

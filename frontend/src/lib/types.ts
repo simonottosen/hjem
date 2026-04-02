@@ -71,6 +71,7 @@ export interface LookupResponse {
   sqmeters: SquareMeterPrices;
   valuation?: DingeoValuation | null;
   comps_estimate?: CompsEstimate | null;
+  warnings?: string[];
   error?: string;
 }
 
@@ -88,4 +89,6 @@ export interface ProgressEvent {
   current: number;
   total: number;
   elapsed_ms: number;
+  warnings?: string[];
+  result?: LookupResponse;
 }

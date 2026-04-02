@@ -4,6 +4,7 @@ import { PriceScatterChart } from "./PriceScatterChart";
 import { SqMeterLineChart } from "./SqMeterLineChart";
 import { SalesTable } from "./SalesTable";
 import { CsvDownloadButton } from "./CsvDownloadButton";
+import { WarningBanner } from "./WarningBanner";
 import {
   Card,
   CardContent,
@@ -30,6 +31,9 @@ export function DashboardLayout({
 }: DashboardLayoutProps) {
   return (
     <div className="space-y-4">
+      {data.warnings && data.warnings.length > 0 && (
+        <WarningBanner warnings={data.warnings} />
+      )}
       <MetricsRow data={data} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

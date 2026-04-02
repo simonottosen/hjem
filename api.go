@@ -36,12 +36,14 @@ func NewServer(db *gorm.DB) *server {
 		dc:       dc,
 		bc:       bc,
 		progress: NewProgress(),
+		stats:    NewHealthStats(),
 	}
 }
 
 type server struct {
 	dc       DawaCacher
 	bc       BoligaCacher
+	stats    *HealthStats
 	progress *Progress
 }
 
@@ -77,6 +79,8 @@ func (s *server) handleLookup() http.HandlerFunc {
 }
 
 func (s *server) runLookup(query string, ranges []int, filter int) {
+	s.stats.RecordLookup()
+
 	s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
 	addrs, err := s.dc.Do(DawaFuzzySearch{
 		Query: query,
@@ -109,10 +113,16 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 	}
 
 	s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
-	sales, err := s.bc.FetchSales(addrs, s.progress)
+	sales, fetchWarnings, err := s.bc.FetchSales(addrs, s.progress, s.stats)
 	if err != nil {
+		// Total failure — no streets succeeded
 		s.progress.Update(StageError, err.Error(), 0, 0)
 		return
+	}
+
+	// Add any partial-failure warnings
+	for _, w := range fetchWarnings {
+		s.progress.AddWarning(w)
 	}
 
 	addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
@@ -121,6 +131,11 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 	if err != nil {
 		s.progress.Update(StageError, err.Error(), 0, 0)
 		return
+	}
+
+	// Attach warnings to the response so the frontend can display them
+	if len(fetchWarnings) > 0 {
+		luResp.Warnings = fetchWarnings
 	}
 
 	// Fetch Dingeo valuation (non-fatal)
@@ -175,7 +190,7 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			addrs = append(addrs, addrsInRange...)
 		}
 
-		sales, err := s.bc.FetchSales(addrs, nil)
+		sales, _, err := s.bc.FetchSales(addrs, nil, s.stats)
 		if err != nil {
 			// handle error
 		}
@@ -215,6 +230,14 @@ func (s *server) handleProgress() http.HandlerFunc {
 	}
 }
 
+func (s *server) handleHealth() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		json.NewEncoder(w).Encode(s.stats.Snapshot())
+	}
+}
+
 //go:embed frontend/dist/index.html
 var indexBytes []byte
 
@@ -242,6 +265,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/dist/app.bundle.js", s.handleBundle())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
 	mux.HandleFunc("/api/progress", s.handleProgress())
+	mux.HandleFunc("/api/health", s.handleHealth())
 	mux.HandleFunc("/download/csv", s.handleCSVDownload())
 
 	return mux
@@ -297,6 +321,7 @@ type LookupResponse struct {
 	SquareMeters  SquareMeterPrices `json:"sqmeters"`
 	Valuation     *DingeoValuation  `json:"valuation,omitempty"`
 	CompsEstimate *CompsEstimate    `json:"comps_estimate,omitempty"`
+	Warnings      []string          `json:"warnings,omitempty"`
 }
 
 type JSONSale struct {

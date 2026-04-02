@@ -1,6 +1,7 @@
 package hjem
 
 import (
+	"log"
 	"math"
 	"net/http"
 	"time"
@@ -48,15 +49,35 @@ func (r *RetryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		resp, err = r.next.RoundTrip(req)
 
 		if err != nil {
+			// Transport/network error — retry with backoff
+			if i < r.maxRetries {
+				backoff := time.Duration(math.Pow(1.5, float64(i))) * time.Second
+				log.Printf("HTTP retry %d/%d for %s: transport error: %v (backoff %s)",
+					i+1, r.maxRetries, req.URL.Host, err, backoff)
+				time.Sleep(backoff)
+				continue
+			}
 			return nil, err
 		}
 
-		if resp.StatusCode != 429 {
+		// Success — no retry needed
+		if resp.StatusCode < 429 {
 			return resp, nil
 		}
 
-		backoff := time.Duration(math.Pow(1.5, float64(i))) * time.Second
-		time.Sleep(backoff)
+		// Rate limited (429) or server error (5xx) — retry with backoff
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			if i < r.maxRetries {
+				backoff := time.Duration(math.Pow(1.5, float64(i))) * time.Second
+				log.Printf("HTTP retry %d/%d for %s: status %d (backoff %s)",
+					i+1, r.maxRetries, req.URL.Host, resp.StatusCode, backoff)
+				resp.Body.Close()
+				time.Sleep(backoff)
+				continue
+			}
+		}
+
+		return resp, nil
 	}
 
 	return resp, err

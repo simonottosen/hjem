@@ -36,7 +36,7 @@ var (
 )
 
 type BoligaCacher interface {
-	FetchSales([]*Address, *Progress) ([][]Sale, error)
+	FetchSales([]*Address, *Progress, *HealthStats) ([][]Sale, []string, error)
 }
 
 type boligaCacher struct {
@@ -50,7 +50,7 @@ func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 
 const cacheExpiry time.Duration = time.Hour * 24 * 10 // 10 days
 
-func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sale, error) {
+func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *HealthStats) ([][]Sale, []string, error) {
 	cachedAddrs := map[int]*Address{}
 	fetchAddrs := map[int]*Address{}
 	var salesExpired []uint
@@ -70,14 +70,19 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 		cachedAddrs[i] = addr
 	}
 
-	log.Printf("Boliga cache: %d cached, %d to fetch, %d expired (of %d total addresses)",
+	log.Printf("Boliga cache: %d cached, %d to fetch, %d expired (of %d total)",
 		len(cachedAddrs), len(fetchAddrs), len(salesExpired), len(addrs))
+	if stats != nil {
+		stats.RecordCacheHit(len(cachedAddrs))
+		stats.RecordCacheMiss(len(fetchAddrs))
+	}
 
 	if len(salesExpired) > 0 {
 		bc.db.Where("addr_id IN ?", salesExpired).Delete(&Sale{})
 	}
 
 	sales := make([][]Sale, len(addrs))
+	var warnings []string
 	if len(fetchAddrs) > 0 {
 		fetchTime := time.Now()
 		addrsToFetch := make([]*Address, len(fetchAddrs))
@@ -89,9 +94,10 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 			i += 1
 		}
 
-		matched, err := BoligaSalesFromAddrs(addrsToFetch, progress)
+		matched, fetchWarnings, err := BoligaSalesFromAddrs(addrsToFetch, progress, stats)
+		warnings = fetchWarnings
 		if err != nil {
-			return nil, err
+			return nil, warnings, err
 		}
 
 		var salesToStore []Sale
@@ -136,13 +142,13 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 			}
 
 			if err := bc.db.Save(&addr).Error; err != nil {
-				return nil, err
+				return nil, warnings, err
 			}
 		}
 
 		if len(salesToStore) > 0 {
 			if err := bc.db.CreateInBatches(&salesToStore, 50).Error; err != nil {
-				return nil, err
+				return nil, warnings, err
 			}
 		}
 
@@ -176,7 +182,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress) ([][]Sa
 		}
 	}
 
-	return sales, nil
+	return sales, warnings, nil
 }
 
 type Sale struct {
@@ -220,7 +226,7 @@ type BoligaPageCrawl struct {
 
 // BoligaSalesFromAddrs fetches Boliga sale listings for the given addresses
 // and returns matched sales grouped by address index.
-func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleItem, error) {
+func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthStats) ([][]BoligaSaleItem, []string, error) {
 	type K struct {
 		Municipality string
 		Street       string
@@ -247,19 +253,43 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleI
 	}
 
 	totalReqs := len(m)
-	var completedReqs int
+	var completedReqs, failedReqs int
 	var totalSales []BoligaSaleItem
+	var warnings []string
+
+	log.Printf("Fetching sales for %d streets...", totalReqs)
+
 	for _, req := range m {
-		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+1, totalReqs), completedReqs, totalReqs)
+		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+failedReqs+1, totalReqs), completedReqs+failedReqs, totalReqs)
 		s, err := req.Fetch()
 		if err != nil {
-			return nil, err
+			failedReqs++
+			errType := "unknown"
+			if strings.Contains(err.Error(), "429") {
+				errType = "rate_limit"
+			} else if strings.Contains(err.Error(), "status 5") {
+				errType = "server_error"
+			}
+			log.Printf("Failed to fetch %s %d: %v", req.StreetName, req.ZipCode, err)
+			if stats != nil {
+				stats.RecordBoligaFail(errType, fmt.Sprintf("%s %d: %v", req.StreetName, req.ZipCode, err))
+			}
+			warnings = append(warnings, fmt.Sprintf("Kunne ikke hente salg for %s (%s)", req.StreetName, classifyError(err)))
+			continue // Continue with remaining streets instead of aborting
 		}
 		completedReqs++
+		if stats != nil {
+			stats.RecordBoligaOK()
+		}
 
 		totalSales = append(totalSales, s...)
 	}
-	log.Printf("Boliga total sales fetched: %d", len(totalSales))
+
+	log.Printf("Completed %d/%d streets (%d sales, %d failed)", completedReqs, totalReqs, len(totalSales), failedReqs)
+
+	if completedReqs == 0 && failedReqs > 0 {
+		return nil, warnings, fmt.Errorf("alle %d gade-opslag fejlede", failedReqs)
+	}
 
 	// Build lookup maps at multiple levels:
 	// 1. Exact address string match
@@ -321,7 +351,22 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress) ([][]BoligaSaleI
 		exactMatches, normMatches, buildingMatches,
 		totalMatched, len(totalSales), skippedSaleType)
 
-	return result, nil
+	return result, warnings, nil
+}
+
+// classifyError returns a user-friendly Danish description of an error.
+func classifyError(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "429") {
+		return "midlertidig blokering fra Boliga"
+	}
+	if strings.Contains(msg, "status 5") {
+		return "serverfejl hos Boliga"
+	}
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline") {
+		return "timeout"
+	}
+	return "netværksfejl"
 }
 
 type BoligaSalesResponse struct {
@@ -369,26 +414,20 @@ func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
 		q.Set("page", strconv.Itoa(page))
 		req.URL.RawQuery = q.Encode()
 
-		log.Printf("Fetching Boliga sales: %s (page %d)", req.URL, page)
 		var sr BoligaSalesResponse
 		resp, err := DefaultClient.Do(req)
 		if err != nil {
-			log.Printf("Boliga request failed: %v", err)
-			return nil, err
+			return nil, fmt.Errorf("%s %d: %v", r.StreetName, r.ZipCode, err)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("Boliga returned status %d", resp.StatusCode)
-			return nil, fmt.Errorf("boliga API returned status %d", resp.StatusCode)
+			return nil, fmt.Errorf("%s %d: status %d", r.StreetName, r.ZipCode, resp.StatusCode)
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-			log.Printf("Boliga decode failed: %v", err)
-			return nil, err
+			return nil, fmt.Errorf("%s %d: decode error: %v", r.StreetName, r.ZipCode, err)
 		}
-
-		log.Printf("Boliga page %d/%d: %d sales", page, sr.Meta.TotalPages, len(sr.Sales))
 		sales = append(sales, sr.Sales...)
 		maxPages = sr.Meta.TotalPages
 		if page >= maxPages {

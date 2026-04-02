@@ -18,12 +18,13 @@ const (
 )
 
 type ProgressEvent struct {
-	Stage     ProgressStage  `json:"stage"`
-	Message   string         `json:"message"`
-	Current   int            `json:"current"`
-	Total     int            `json:"total"`
-	ElapsedMs int64          `json:"elapsed_ms"`
-	Result    interface{}    `json:"result,omitempty"`
+	Stage     ProgressStage `json:"stage"`
+	Message   string        `json:"message"`
+	Current   int           `json:"current"`
+	Total     int           `json:"total"`
+	ElapsedMs int64         `json:"elapsed_ms"`
+	Warnings  []string      `json:"warnings,omitempty"`
+	Result    interface{}   `json:"result,omitempty"`
 }
 
 type Progress struct {
@@ -34,6 +35,7 @@ type Progress struct {
 	total     int
 	startedAt time.Time
 	result    interface{}
+	warnings  []string
 	notify    chan struct{}
 }
 
@@ -61,6 +63,15 @@ func (p *Progress) Update(stage ProgressStage, message string, current, total in
 	}
 }
 
+func (p *Progress) AddWarning(msg string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.warnings = append(p.warnings, msg)
+	p.mu.Unlock()
+}
+
 func (p *Progress) SetResult(result interface{}) {
 	p.mu.Lock()
 	p.result = result
@@ -74,6 +85,7 @@ func (p *Progress) Reset() {
 	p.current = 0
 	p.total = 0
 	p.result = nil
+	p.warnings = nil
 	p.startedAt = time.Now()
 	p.mu.Unlock()
 }
@@ -88,7 +100,9 @@ func (p *Progress) Snapshot() ProgressEvent {
 		Total:     p.total,
 		ElapsedMs: time.Since(p.startedAt).Milliseconds(),
 	}
-	// Only include result when done
+	if len(p.warnings) > 0 {
+		evt.Warnings = p.warnings
+	}
 	if p.stage == StageDone && p.result != nil {
 		evt.Result = p.result
 	}

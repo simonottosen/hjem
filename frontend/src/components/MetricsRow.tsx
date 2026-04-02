@@ -9,7 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Home, Landmark, BarChart3, ArrowUpRight, ArrowDownRight, Info } from "lucide-react";
+import { Home, Landmark, BarChart3, ArrowUpRight, ArrowDownRight, Info, AlertTriangle } from "lucide-react";
 
 interface MetricsRowProps {
   data: LookupResponse;
@@ -287,6 +287,12 @@ export function MetricsRow({ data }: MetricsRowProps) {
                 </p>
                 {yoyPctChange != null && <PctBadge pct={yoyPctChange} />}
               </div>
+            )}
+            {data.warnings && data.warnings.length > 0 && (
+              <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                <AlertTriangle className="size-3" />
+                Ufuldstændigt datagrundlag
+              </p>
             )}
           </CardContent>
         </Card>

@@ -34,6 +34,14 @@ const errorTranslations: Record<string, string> = {
     "Forbindelsen til serveren blev afbrudt. Prøv igen — det kan tage op til 5 minutter at hente alle salgsdata.",
   "network":
     "Netværksfejl. Tjek din forbindelse og prøv igen.",
+  "alle":
+    "Alle gade-opslag fejlede. Prøv igen om et par minutter.",
+  "429":
+    "Boliga har midlertidigt blokeret forespørgsler. Prøv igen om et par minutter.",
+  "rate limit":
+    "Boliga har midlertidigt blokeret forespørgsler. Prøv igen om et par minutter.",
+  "status 5":
+    "Boliga-serveren har midlertidigt problemer. Prøv igen senere.",
 };
 
 export function translateError(error: string): string {
