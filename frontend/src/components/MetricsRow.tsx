@@ -199,9 +199,12 @@ export function MetricsRow({ data }: MetricsRowProps) {
                       {compsPctChange != null && <PctBadge pct={compsPctChange} />}
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      {formatDKK(comps.low)}–{formatDKK(comps.high)}
+                      {comps.sqm_price.toLocaleString("da-DK")} kr/m²
                     </p>
-                    <div className="flex items-center gap-1.5">
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Bedste estimerede interval: {formatDKK(comps.low)}–{formatDKK(comps.high)}
+                    </p>
+                    <div className="flex items-center gap-1.5 mt-1">
                       <Badge
                         variant={comps.confidence === "high" ? "default" : comps.confidence === "medium" ? "secondary" : "outline"}
                         className="text-[10px]"
