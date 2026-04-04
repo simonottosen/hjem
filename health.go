@@ -1,6 +1,8 @@
 package hjem
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -120,4 +122,50 @@ func (h *HealthStats) Snapshot() HealthResponse {
 		},
 		RecentErrors: h.recentErrors,
 	}
+}
+
+func (h *HealthStats) PrometheusMetrics() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var b strings.Builder
+
+	metric := func(name, help, typ string, value interface{}) {
+		fmt.Fprintf(&b, "# HELP %s %s\n", name, help)
+		fmt.Fprintf(&b, "# TYPE %s %s\n", name, typ)
+		fmt.Fprintf(&b, "%s %v\n", name, value)
+	}
+
+	uptime := time.Since(h.startedAt).Seconds()
+	metric("hjem_uptime_seconds", "Time since server start in seconds.", "gauge", uptime)
+	metric("hjem_lookups_total", "Total number of address lookups.", "counter", h.totalLookups)
+	metric("hjem_cache_hits_total", "Total number of address cache hits.", "counter", h.cacheHits)
+	metric("hjem_cache_misses_total", "Total number of address cache misses.", "counter", h.cacheMisses)
+
+	fmt.Fprintf(&b, "# HELP hjem_boliga_requests_total Total Boliga API requests by result.\n")
+	fmt.Fprintf(&b, "# TYPE hjem_boliga_requests_total counter\n")
+	fmt.Fprintf(&b, "hjem_boliga_requests_total{result=\"ok\"} %d\n", h.boligaOK)
+	fmt.Fprintf(&b, "hjem_boliga_requests_total{result=\"fail\"} %d\n", h.boligaFail)
+
+	if h.boligaLastOK != nil {
+		metric("hjem_boliga_last_ok_timestamp", "Unix timestamp of last successful Boliga request.", "gauge", h.boligaLastOK.Unix())
+	}
+	if h.boligaLastFail != nil {
+		metric("hjem_boliga_last_fail_timestamp", "Unix timestamp of last failed Boliga request.", "gauge", h.boligaLastFail.Unix())
+	}
+
+	// Error counts by type
+	errCounts := map[string]int{}
+	for _, e := range h.recentErrors {
+		errCounts[e.Type]++
+	}
+	if len(errCounts) > 0 {
+		fmt.Fprintf(&b, "# HELP hjem_recent_errors Recent errors by type (last 20).\n")
+		fmt.Fprintf(&b, "# TYPE hjem_recent_errors gauge\n")
+		for typ, count := range errCounts {
+			fmt.Fprintf(&b, "hjem_recent_errors{type=%q} %d\n", typ, count)
+		}
+	}
+
+	return b.String()
 }

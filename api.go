@@ -238,6 +238,13 @@ func (s *server) handleHealth() http.HandlerFunc {
 	}
 }
 
+func (s *server) handleMetrics() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Write([]byte(s.stats.PrometheusMetrics()))
+	}
+}
+
 //go:embed frontend/dist/index.html
 var indexBytes []byte
 
@@ -266,6 +273,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/lookup", s.handleLookup())
 	mux.HandleFunc("/api/progress", s.handleProgress())
 	mux.HandleFunc("/api/health", s.handleHealth())
+	mux.HandleFunc("/metrics", s.handleMetrics())
 	mux.HandleFunc("/download/csv", s.handleCSVDownload())
 
 	return mux
