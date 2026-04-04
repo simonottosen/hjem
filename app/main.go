@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/tpanum/hjem"
 	"gorm.io/driver/postgres"
@@ -18,6 +20,7 @@ func main() {
 	port := flag.Int("port", 8080, "port to use for the webserver. default: 8080")
 	flag.Parse()
 
+	log.Println("Starting hjem...")
 	db := connectDB(*dbFile)
 
 	s := hjem.NewServer(db)
@@ -35,8 +38,10 @@ func connectDB(sqliteFile string) *gorm.DB {
 		pgUser := envOrDefault("POSTGRES_USER", "postgres")
 		pgDB := envOrDefault("POSTGRES_DB", "hjem")
 
-		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=5",
 			pgHost, pgPort, pgUser, pgPass, pgDB)
+
+		log.Printf("Attempting PostgreSQL connection to %s:%s/%s...", pgHost, pgPort, pgDB)
 
 		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 		if err == nil {
@@ -45,8 +50,10 @@ func connectDB(sqliteFile string) *gorm.DB {
 				sqlDB.SetMaxOpenConns(25)
 				sqlDB.SetMaxIdleConns(5)
 
-				// Verify the connection actually works
-				if err := sqlDB.Ping(); err == nil {
+				// Verify with a 5-second timeout
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := sqlDB.PingContext(ctx); err == nil {
 					log.Printf("Connected to PostgreSQL at %s:%s/%s", pgHost, pgPort, pgDB)
 					return db
 				} else {
