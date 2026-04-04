@@ -21,16 +21,32 @@ func main() {
 	flag.Parse()
 
 	log.Println("Starting hjem...")
-	db := connectDB(*dbFile)
+	db, dbName := connectDB(*dbFile)
 
 	s := hjem.NewServer(db)
+
+	// Log database status after AutoMigrate has run
+	logDBStatus(db, dbName)
+
 	fmt.Printf("Server started on http://localhost:%d\n", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), s.Routes()); err != nil {
 		fmt.Println("Error starting server:", err)
 	}
 }
 
-func connectDB(sqliteFile string) *gorm.DB {
+func logDBStatus(db *gorm.DB, dbName string) {
+	var addrCount, saleCount, cacheCount int64
+	db.Model(&hjem.Address{}).Count(&addrCount)
+	db.Model(&hjem.Sale{}).Count(&saleCount)
+	db.Model(&hjem.DawaQueryCache{}).Count(&cacheCount)
+
+	log.Printf("Database: %s", dbName)
+	log.Printf("  Addresses: %d", addrCount)
+	log.Printf("  Sales:     %d", saleCount)
+	log.Printf("  Cached queries: %d", cacheCount)
+}
+
+func connectDB(sqliteFile string) (*gorm.DB, string) {
 	// Try PostgreSQL if POSTGRES_PASSWORD is set
 	if pgPass := os.Getenv("POSTGRES_PASSWORD"); pgPass != "" {
 		pgHost := envOrDefault("POSTGRES_HOST", "localhost")
@@ -50,12 +66,10 @@ func connectDB(sqliteFile string) *gorm.DB {
 				sqlDB.SetMaxOpenConns(25)
 				sqlDB.SetMaxIdleConns(5)
 
-				// Verify with a 5-second timeout
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := sqlDB.PingContext(ctx); err == nil {
-					log.Printf("Connected to PostgreSQL at %s:%s/%s", pgHost, pgPort, pgDB)
-					return db
+					return db, fmt.Sprintf("PostgreSQL %s:%s/%s", pgHost, pgPort, pgDB)
 				} else {
 					log.Printf("PostgreSQL ping failed: %v — falling back to SQLite", err)
 				}
@@ -82,8 +96,7 @@ func connectDB(sqliteFile string) *gorm.DB {
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA busy_timeout=5000")
 
-	log.Printf("Using SQLite at %s", sqliteFile)
-	return db
+	return db, fmt.Sprintf("SQLite %s", sqliteFile)
 }
 
 func envOrDefault(key, defaultVal string) string {
