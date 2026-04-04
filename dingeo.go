@@ -1,12 +1,14 @@
 package hjem
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 type DingeoEstimate struct {
@@ -26,6 +28,30 @@ type DingeoValuation struct {
 	CountEvals    int              `json:"countEvals"`
 }
 
+// FlareSolverr request/response types
+type flareSolverrRequest struct {
+	Cmd        string `json:"cmd"`
+	URL        string `json:"url"`
+	MaxTimeout int    `json:"maxTimeout"`
+}
+
+type flareSolverrResponse struct {
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+	Solution struct {
+		URL      string `json:"url"`
+		Status   int    `json:"status"`
+		Response string `json:"response"`
+	} `json:"solution"`
+}
+
+func getFlareSolverrURL() string {
+	if url := os.Getenv("FLARESOLVERR_URL"); url != "" {
+		return url
+	}
+	return "" // disabled by default
+}
+
 func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
 	if dawaUUID == "" {
 		return nil, nil
@@ -36,52 +62,95 @@ func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
 		strings.ToUpper(dawaUUID),
 	)
 
+	flareSolverrURL := getFlareSolverrURL()
+
+	// If FlareSolverr is configured, use it to bypass Cloudflare challenges
+	if flareSolverrURL != "" {
+		return fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID)
+	}
+
+	// Direct request (works when not behind Cloudflare bot detection)
+	return fetchDingeoDirect(endpoint, dawaUUID)
+}
+
+func fetchDingeoDirect(endpoint, dawaUUID string) (*DingeoValuation, error) {
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil
 	}
 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9,da;q=0.8")
 	req.Header.Set("Origin", "https://www.boliga.dk")
 	req.Header.Set("Referer", "https://www.boliga.dk/")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
 
-	log.Printf("Fetching Dingeo valuation for %s", dawaUUID)
+	log.Printf("Fetching Dingeo valuation (direct) for %s", dawaUUID)
 	resp, err := DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Dingeo request failed: %v", err)
-		return nil, nil // non-fatal: don't fail the whole lookup
+		return nil, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Dingeo returned status %d", resp.StatusCode)
-		log.Printf("Dingeo response headers: %v", resp.Header)
-		if len(body) > 500 {
-			log.Printf("Dingeo response body (truncated): %s", string(body[:500]))
-		} else {
-			log.Printf("Dingeo response body: %s", string(body))
-		}
-		log.Printf("Dingeo request URL: %s", endpoint)
-		log.Printf("Dingeo request headers: %v", req.Header)
-		return nil, nil // non-fatal
+		log.Printf("Dingeo returned status %d (direct)", resp.StatusCode)
+		return nil, nil
 	}
 
 	var val DingeoValuation
 	if err := json.NewDecoder(resp.Body).Decode(&val); err != nil {
 		log.Printf("Dingeo decode failed: %v", err)
-		return nil, nil // non-fatal
+		return nil, nil
 	}
 
-	log.Printf("Dingeo valuation: %d estimates, range %d–%d, mean %.0f",
-		val.CountEvals, val.MinVal, val.MaxVal, val.Mean)
+	log.Printf("Dingeo valuation: %d estimates, mean %.0f", val.CountEvals, val.Mean)
+	return &val, nil
+}
 
+func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*DingeoValuation, error) {
+	log.Printf("Fetching Dingeo valuation (FlareSolverr) for %s", dawaUUID)
+
+	body, err := json.Marshal(flareSolverrRequest{
+		Cmd:        "request.get",
+		URL:        endpoint,
+		MaxTimeout: 30000,
+	})
+	if err != nil {
+		log.Printf("FlareSolverr marshal failed: %v", err)
+		return nil, nil
+	}
+
+	client := http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Post(flareSolverrURL+"/v1", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("FlareSolverr request failed: %v", err)
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	var fsResp flareSolverrResponse
+	if err := json.NewDecoder(resp.Body).Decode(&fsResp); err != nil {
+		log.Printf("FlareSolverr decode failed: %v", err)
+		return nil, nil
+	}
+
+	if fsResp.Status != "ok" {
+		log.Printf("FlareSolverr error: %s", fsResp.Message)
+		return nil, nil
+	}
+
+	if fsResp.Solution.Status != 200 {
+		log.Printf("Dingeo returned status %d via FlareSolverr", fsResp.Solution.Status)
+		return nil, nil
+	}
+
+	// Parse the JSON from the response body
+	var val DingeoValuation
+	if err := json.NewDecoder(strings.NewReader(fsResp.Solution.Response)).Decode(&val); err != nil {
+		log.Printf("Dingeo decode (via FlareSolverr) failed: %v", err)
+		return nil, nil
+	}
+
+	log.Printf("Dingeo valuation (via FlareSolverr): %d estimates, mean %.0f", val.CountEvals, val.Mean)
 	return &val, nil
 }

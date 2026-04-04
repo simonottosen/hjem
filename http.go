@@ -51,7 +51,7 @@ func (r *RetryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		if err != nil {
 			// Transport/network error — retry with backoff
 			if i < r.maxRetries {
-				backoff := time.Duration(math.Pow(1.5, float64(i))) * time.Second
+				backoff := time.Duration(math.Pow(2.0, float64(i+1))) * time.Second // 2s, 4s, 8s, 16s, 32s
 				log.Printf("HTTP retry %d/%d for %s: transport error: %v (backoff %s)",
 					i+1, r.maxRetries, req.URL.Host, err, backoff)
 				time.Sleep(backoff)
@@ -68,7 +68,7 @@ func (r *RetryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		// Rate limited (429) or server error (5xx) — retry with backoff
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			if i < r.maxRetries {
-				backoff := time.Duration(math.Pow(1.5, float64(i))) * time.Second
+				backoff := time.Duration(math.Pow(2.0, float64(i+1))) * time.Second // 2s, 4s, 8s, 16s, 32s
 				log.Printf("HTTP retry %d/%d for %s: status %d (backoff %s)",
 					i+1, r.maxRetries, req.URL.Host, resp.StatusCode, backoff)
 				resp.Body.Close()

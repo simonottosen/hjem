@@ -138,7 +138,7 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 		luResp.Warnings = fetchWarnings
 	}
 
-	// Fetch Dingeo valuation (non-fatal)
+	// Fetch Dingeo valuation via FlareSolverr if configured, otherwise direct (non-fatal)
 	luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
 
 	// Store result and mark done
