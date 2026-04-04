@@ -107,6 +107,20 @@ func fetchDingeoDirect(endpoint, dawaUUID string) (*DingeoValuation, error) {
 	return &val, nil
 }
 
+// extractJSON finds the first JSON object in a string that may contain HTML wrapping.
+// Browsers render JSON API responses inside <pre> tags or <body> directly.
+func extractJSON(s string) string {
+	start := strings.Index(s, "{")
+	if start == -1 {
+		return ""
+	}
+	end := strings.LastIndex(s, "}")
+	if end == -1 || end <= start {
+		return ""
+	}
+	return s[start : end+1]
+}
+
 func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*DingeoValuation, error) {
 	log.Printf("Fetching Dingeo valuation (FlareSolverr) for %s", dawaUUID)
 
@@ -144,9 +158,20 @@ func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*Di
 		return nil, nil
 	}
 
-	// Parse the JSON from the response body
+	// FlareSolverr returns the page HTML. The JSON may be wrapped in HTML tags.
+	// Extract the JSON content — look for the first '{' to last '}'
+	rawResponse := fsResp.Solution.Response
+	jsonStr := extractJSON(rawResponse)
+	if jsonStr == "" {
+		log.Printf("Dingeo via FlareSolverr: no JSON found in response (length %d)", len(rawResponse))
+		if len(rawResponse) > 200 {
+			log.Printf("Dingeo response preview: %s", rawResponse[:200])
+		}
+		return nil, nil
+	}
+
 	var val DingeoValuation
-	if err := json.NewDecoder(strings.NewReader(fsResp.Solution.Response)).Decode(&val); err != nil {
+	if err := json.NewDecoder(strings.NewReader(jsonStr)).Decode(&val); err != nil {
 		log.Printf("Dingeo decode (via FlareSolverr) failed: %v", err)
 		return nil, nil
 	}
