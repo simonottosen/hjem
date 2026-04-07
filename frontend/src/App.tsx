@@ -35,6 +35,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("1");
   const [range, setRange] = useState("250");
+  const [hasSearched, setHasSearched] = useState(false);
 
   // Address exclusion state
   const [excludedAddrs, setExcludedAddrs] = useState<Set<number>>(new Set());
@@ -59,10 +60,10 @@ export default function App() {
 
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
+    setHasSearched(true);
     setExcludedAddrs(new Set());
     reset();
     search(query, Number(range), Number(filter), () => {
-      // POST accepted — start polling for progress + result
       startPolling(setResult, setSearchError);
     });
   }, [query, range, filter, search, reset, startPolling, setResult, setSearchError]);
@@ -78,8 +79,8 @@ export default function App() {
     isLoading,
   };
 
-  // Before any search: centered landing page
-  if (!hasResults && !isLoading && !error) {
+  // Before first search ever: centered landing page
+  if (!hasSearched) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center px-4">
         <div className="w-full max-w-md space-y-6 -mt-20">
@@ -101,7 +102,7 @@ export default function App() {
     );
   }
 
-  // After search: compact header with results
+  // After search: compact header with results/loading/error
   return (
     <div className="min-h-screen bg-background">
       <div className="mx-auto max-w-7xl px-4 py-4 space-y-4">
@@ -117,6 +118,12 @@ export default function App() {
         {isLoading && <ProgressBar progress={progress} />}
 
         {!isLoading && error && <ErrorAlert error={error} />}
+
+        {!isLoading && !error && data && (!data.addresses || data.addresses.length === 0) && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            Ingen sammenlignelige salg fundet i området. Prøv at søge med en større radius.
+          </div>
+        )}
 
         {hasResults && (
           <DashboardLayout
