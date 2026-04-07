@@ -512,16 +512,29 @@ func normalizeAddr(s string) string {
 }
 
 func FilterAddressesByProperty(pt PropertyType, addrs []*Address, sales [][]Sale) ([]*Address, [][]Sale) {
+	// If the primary address has no known property type, skip filtering entirely
+	// — we can't meaningfully filter without knowing what type we're comparing against
+	if pt == 0 {
+		log.Printf("Property type filter: skipped (primary has unknown type)")
+		return addrs, sales
+	}
+
 	var oAddrs []*Address
 	var oSales [][]Sale
+	var kept, filtered int
 
-	for i, _ := range addrs {
+	for i := range addrs {
 		a, s := addrs[i], sales[i]
-		if a.BoligaPropertyKind == pt {
+		// Always keep the primary address (index 0) and addresses matching the type
+		if i == 0 || a.BoligaPropertyKind == pt || a.BoligaPropertyKind == 0 {
 			oAddrs = append(oAddrs, a)
 			oSales = append(oSales, s)
+			kept++
+		} else {
+			filtered++
 		}
 	}
 
+	log.Printf("Property type filter: kept %d, filtered %d (type=%d)", kept, filtered, pt)
 	return oAddrs, oSales
 }
