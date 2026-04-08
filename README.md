@@ -4,6 +4,8 @@ Et værktøj til **prisanalyse af danske boliger** baseret på historiske salgsd
 
 Værktøjet er skabt for at give boligkøbere bedre indsigt i markedet — uden at skulle stole blindt på en ejendomsmæglers vurdering.
 
+![Eksempel på prisanalyse](./example.png)
+
 ## Funktioner
 
 - **Sammenlignelig salgsanalyse** — vægtet estimat baseret på nylige salg med lignende størrelse, rum, byggeår og afstand
