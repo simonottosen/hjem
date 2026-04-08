@@ -103,6 +103,11 @@ func fetchDingeoDirect(endpoint, dawaUUID string) (*DingeoValuation, error) {
 		return nil, nil
 	}
 
+	if val.CountEvals == 0 {
+		log.Printf("Dingeo: no valuations available for %s", dawaUUID)
+		return nil, nil
+	}
+
 	log.Printf("Dingeo valuation: %d estimates, mean %.0f", val.CountEvals, val.Mean)
 	return &val, nil
 }
@@ -173,6 +178,11 @@ func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*Di
 	var val DingeoValuation
 	if err := json.NewDecoder(strings.NewReader(jsonStr)).Decode(&val); err != nil {
 		log.Printf("Dingeo decode (via FlareSolverr) failed: %v", err)
+		return nil, nil
+	}
+
+	if val.CountEvals == 0 {
+		log.Printf("Dingeo: no valuations available for %s (via FlareSolverr)", dawaUUID)
 		return nil, nil
 	}
 
