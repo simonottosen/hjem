@@ -1,6 +1,7 @@
 package hjem
 
 import (
+	"context"
 	_ "embed"
 	"encoding/csv"
 	"encoding/json"
@@ -41,10 +42,11 @@ func NewServer(db *gorm.DB) *server {
 }
 
 type server struct {
-	dc       DawaCacher
-	bc       BoligaCacher
-	stats    *HealthStats
-	progress *Progress
+	dc          DawaCacher
+	bc          BoligaCacher
+	stats       *HealthStats
+	progress    *Progress
+	cancelLookup context.CancelFunc
 }
 
 func (s *server) handleLookup() http.HandlerFunc {
@@ -55,6 +57,11 @@ func (s *server) handleLookup() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Cancel any previous in-flight lookup to prevent result races
+		if s.cancelLookup != nil {
+			s.cancelLookup()
+		}
+
 		s.progress.Reset()
 
 		var req Request
@@ -71,15 +78,20 @@ func (s *server) handleLookup() http.HandlerFunc {
 		// Run the lookup in a background goroutine so the HTTP response
 		// returns immediately. The frontend polls /api/progress for status
 		// and the result. This avoids Cloudflare tunnel timeouts.
-		go s.runLookup(req.Query, req.Ranges, req.Filter)
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancelLookup = cancel
+		go s.runLookup(ctx, req.Query, req.Ranges, req.Filter)
 
 		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 	}
 }
 
-func (s *server) runLookup(query string, ranges []int, filter int) {
+func (s *server) runLookup(ctx context.Context, query string, ranges []int, filter int) {
 	s.stats.RecordLookup()
+
+	// Helper: check if this lookup was cancelled (replaced by a newer search)
+	cancelled := func() bool { return ctx.Err() != nil }
 
 	s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
 	addrs, err := s.dc.Do(DawaFuzzySearch{
@@ -87,6 +99,10 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 	})
 	if err != nil {
 		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+	if cancelled() {
+		log.Printf("Lookup cancelled after DAWA search for %q", query)
 		return
 	}
 
@@ -107,6 +123,10 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 		s.progress.Update(StageError, err.Error(), 0, 0)
 		return
 	}
+	if cancelled() {
+		log.Printf("Lookup cancelled after range construction for %q", query)
+		return
+	}
 
 	for _, addrsInRange := range rangeMap {
 		addrs = append(addrs, addrsInRange...)
@@ -115,8 +135,11 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 	s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
 	sales, fetchWarnings, err := s.bc.FetchSales(addrs, s.progress, s.stats)
 	if err != nil {
-		// Total failure — no streets succeeded
 		s.progress.Update(StageError, err.Error(), 0, 0)
+		return
+	}
+	if cancelled() {
+		log.Printf("Lookup cancelled after Boliga fetch for %q", query)
 		return
 	}
 
@@ -136,6 +159,12 @@ func (s *server) runLookup(query string, ranges []int, filter int) {
 	// Attach warnings to the response so the frontend can display them
 	if len(fetchWarnings) > 0 {
 		luResp.Warnings = fetchWarnings
+	}
+
+	// Final cancellation check before setting result — don't overwrite a newer lookup
+	if cancelled() {
+		log.Printf("Lookup cancelled before result delivery for %q", query)
+		return
 	}
 
 	// Fetch Dingeo valuation via FlareSolverr if configured, otherwise direct (non-fatal)
