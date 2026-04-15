@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { LookupResponse } from "@/lib/types";
 import { formatDKK, formatDate, formatPct } from "@/lib/formatting";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,7 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Home, Landmark, BarChart3, ArrowUpRight, ArrowDownRight, Info, AlertTriangle } from "lucide-react";
+import { Home, Landmark, BarChart3, ArrowUpRight, ArrowDownRight, Info, AlertTriangle, ChevronDown } from "lucide-react";
 
 interface MetricsRowProps {
   data: LookupResponse;
@@ -105,6 +105,9 @@ export function MetricsRow({ data }: MetricsRowProps) {
     return null;
   }, [data.sqmeters, primary, latest]);
 
+  const [showSecondaryEstimates, setShowSecondaryEstimates] = useState(false);
+  const [showAllValuations, setShowAllValuations] = useState(false);
+
   const compsPctChange = useMemo(() => {
     if (!comps || !lastSale || lastSale.amount === 0) return null;
     return ((comps.value - lastSale.amount) / lastSale.amount) * 100;
@@ -183,90 +186,104 @@ export function MetricsRow({ data }: MetricsRowProps) {
             </CardTitle>
           </CardHeader>
           <CardContent className="px-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Left: Comparable sales estimate */}
-              <div className="space-y-1">
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
-                  Sammenlignelige salg
-                  <InfoTip text="Vægtet estimat baseret på nylige salg i området med lignende størrelse, antal rum, byggeår og afstand. Nyere og mere lignende boliger vægtes højere." />
-                </p>
-                {comps ? (
-                  <>
-                    <div className="flex items-baseline gap-2">
-                      <p className="text-2xl font-bold">
-                        ~{formatDKK(comps.value)}
-                      </p>
-                      {compsPctChange != null && <PctBadge pct={compsPctChange} />}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {comps.sqm_price.toLocaleString("da-DK")} kr/m²
+            {/* Primary estimate: always visible */}
+            <div className="space-y-1">
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
+                Sammenlignelige salg
+                <InfoTip text="Vægtet estimat baseret på nylige salg i området med lignende størrelse, antal rum, byggeår og afstand. Nyere og mere lignende boliger vægtes højere." />
+              </p>
+              {comps ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <p className="text-2xl font-bold">
+                      ~{formatDKK(comps.value)}
                     </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Bedste estimerede interval: {formatDKK(comps.low)}–{formatDKK(comps.high)}
-                    </p>
-                    <div className="flex items-center gap-1.5 mt-1">
-                      <Badge
-                        variant={comps.confidence === "high" ? "default" : comps.confidence === "medium" ? "secondary" : "outline"}
-                        className="text-[10px]"
-                      >
-                        {comps.confidence === "high" ? "Høj" : comps.confidence === "medium" ? "Middel" : "Lav"} tillid
-                      </Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {comps.num_comps} boliger
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground">Ikke nok data</p>
-                )}
-              </div>
-
-              {/* Right: Other estimates */}
-              <div className="space-y-2.5">
-                {/* Simple m² estimate */}
-                {sqmProjectedValue && (
-                  <div>
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
-                      Simpel m²-pris
-                      <InfoTip text="Områdets gennemsnitlige kvadratmeterpris ganget med boligens størrelse. Tager ikke højde for forskelle i stand, rum eller byggeår." />
-                    </p>
-                    <div className="flex items-baseline gap-2">
-                      <p className="text-base font-semibold">
-                        ~{formatDKK(sqmProjectedValue.value)}
-                      </p>
-                      {simplePctChange != null && <PctBadge pct={simplePctChange} />}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {sqmProjectedValue.sqmPrice.toLocaleString("da-DK")} kr/m² × {primary?.building_size} m²
-                    </p>
+                    {compsPctChange != null && <PctBadge pct={compsPctChange} />}
                   </div>
-                )}
-
-                {/* Average of public valuations */}
-                {valuation && valuation.includedEvals?.length > 0 && (() => {
-                  const included = valuation.includedEvals;
-                  const dingeoMean = Math.round(
-                    included.reduce((sum, e) => sum + e.value, 0) / included.length
-                  );
-                  const dingeoMin = Math.min(...included.map((e) => e.value));
-                  const dingeoMax = Math.max(...included.map((e) => e.value));
-                  return (
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
-                        Gns. offentlige vurderinger
-                        <InfoTip text="Gennemsnit af offentligt tilgængelige vurderinger fra bl.a. Skat, Realkredit, Geomatics AVM og Vertex AI. De enkelte vurderinger vises nedenfor." />
-                      </p>
-                      <p className="text-base font-semibold">
-                        ~{formatDKK(dingeoMean)}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {formatDKK(dingeoMin)}–{formatDKK(dingeoMax)}
-                      </p>
-                    </div>
-                  );
-                })()}
-              </div>
+                  <p className="text-xs text-muted-foreground">
+                    {comps.sqm_price.toLocaleString("da-DK")} kr/m²
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Bedste estimerede interval: {formatDKK(comps.low)}–{formatDKK(comps.high)}
+                  </p>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <Badge
+                      variant={comps.confidence === "high" ? "default" : comps.confidence === "medium" ? "secondary" : "outline"}
+                      className="text-[10px]"
+                    >
+                      {comps.confidence === "high" ? "Høj" : comps.confidence === "medium" ? "Middel" : "Lav"} tillid
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      {comps.num_comps} boliger
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">Ikke nok data</p>
+              )}
             </div>
+
+            {/* Secondary estimates: collapsible on mobile, always visible on sm+ */}
+            {(sqmProjectedValue || (valuation && valuation.includedEvals?.length > 0)) && (
+              <>
+                {/* Toggle button — mobile only */}
+                <button
+                  type="button"
+                  className="sm:hidden flex items-center gap-1 text-xs text-muted-foreground mt-3 py-1"
+                  onClick={() => setShowSecondaryEstimates((v) => !v)}
+                >
+                  <ChevronDown className={`size-3.5 transition-transform ${showSecondaryEstimates ? "rotate-180" : ""}`} />
+                  {showSecondaryEstimates ? "Skjul andre estimater" : "Vis andre estimater"}
+                </button>
+
+                <div className={`mt-3 pt-3 border-t space-y-2.5 ${showSecondaryEstimates ? "" : "hidden"} sm:block`}>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Simple m² estimate */}
+                    {sqmProjectedValue && (
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
+                          Simpel m²-pris
+                          <InfoTip text="Områdets gennemsnitlige kvadratmeterpris ganget med boligens størrelse. Tager ikke højde for forskelle i stand, rum eller byggeår." />
+                        </p>
+                        <div className="flex items-baseline gap-2">
+                          <p className="text-base font-semibold">
+                            ~{formatDKK(sqmProjectedValue.value)}
+                          </p>
+                          {simplePctChange != null && <PctBadge pct={simplePctChange} />}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {sqmProjectedValue.sqmPrice.toLocaleString("da-DK")} kr/m² × {primary?.building_size} m²
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Average of public valuations */}
+                    {valuation && valuation.includedEvals?.length > 0 && (() => {
+                      const included = valuation.includedEvals;
+                      const dingeoMean = Math.round(
+                        included.reduce((sum, e) => sum + e.value, 0) / included.length
+                      );
+                      const dingeoMin = Math.min(...included.map((e) => e.value));
+                      const dingeoMax = Math.max(...included.map((e) => e.value));
+                      return (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
+                            Gns. offentlige vurderinger
+                            <InfoTip text="Gennemsnit af offentligt tilgængelige vurderinger fra bl.a. Skat, Realkredit, Geomatics AVM og Vertex AI. De enkelte vurderinger vises nedenfor." />
+                          </p>
+                          <p className="text-base font-semibold">
+                            ~{formatDKK(dingeoMean)}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatDKK(dingeoMin)}–{formatDKK(dingeoMax)}
+                          </p>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -305,7 +322,43 @@ export function MetricsRow({ data }: MetricsRowProps) {
       {valuation && valuation.includedEvals?.length > 0 && (
         <Card className="py-3">
           <CardContent className="px-4">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-2">
+            {/* Mobile: show first 2, expand for rest */}
+            <div className="sm:hidden">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                {valuation.includedEvals.slice(0, 2).map((est) => (
+                  <div key={est.link}>
+                    <p className="text-xs text-muted-foreground truncate">{est.name}</p>
+                    <p className="text-sm font-semibold font-mono">{formatDKK(est.value)}</p>
+                  </div>
+                ))}
+              </div>
+              {valuation.includedEvals.length > 2 && (
+                <>
+                  {showAllValuations && (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-2">
+                      {valuation.includedEvals.slice(2).map((est) => (
+                        <div key={est.link}>
+                          <p className="text-xs text-muted-foreground truncate">{est.name}</p>
+                          <p className="text-sm font-semibold font-mono">{formatDKK(est.value)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-xs text-muted-foreground mt-2 py-1"
+                    onClick={() => setShowAllValuations((v) => !v)}
+                  >
+                    <ChevronDown className={`size-3.5 transition-transform ${showAllValuations ? "rotate-180" : ""}`} />
+                    {showAllValuations
+                      ? "Vis færre"
+                      : `Vis alle ${valuation.includedEvals.length} vurderinger`}
+                  </button>
+                </>
+              )}
+            </div>
+            {/* sm+: show all in grid */}
+            <div className="hidden sm:grid grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-2">
               {valuation.includedEvals.map((est) => (
                 <div key={est.link}>
                   <p className="text-xs text-muted-foreground truncate">{est.name}</p>
