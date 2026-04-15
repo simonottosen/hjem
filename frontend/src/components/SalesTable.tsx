@@ -140,7 +140,7 @@ export function SalesTable({
                   <Info className="size-2.5" />
                 </span>
               </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-[220px] text-xs font-normal">
+              <TooltipContent className="max-w-[220px] text-xs font-normal">
                 {info}
               </TooltipContent>
             </Tooltip>
@@ -216,7 +216,7 @@ export function SalesTable({
                               {s.sqmPrice.toLocaleString("da-DK")}
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent side="top" className="max-w-xs">
+                          <TooltipContent className="max-w-xs">
                             <p className="font-semibold text-xs">
                               {primary?.full_txt}
                             </p>
