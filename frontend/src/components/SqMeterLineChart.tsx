@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { LookupResponse } from "@/lib/types";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 interface SqMeterLineChartProps {
   data: LookupResponse;
@@ -21,6 +22,10 @@ const AMBER = "#ffb700";
 const BAND_COLOR = "#4685e333";
 
 export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
+  const isMobile = useMediaQuery("(max-width: 640px)");
+  const chartHeight = isMobile ? 250 : 350;
+  const axisFontSize = isMobile ? 10 : 11;
+
   const { chartData, projectionKeys } = useMemo(() => {
     const globalEntries = Object.entries(data.sqmeters.global).sort(
       ([a], [b]) => new Date(a).getTime() - new Date(b).getTime()
@@ -104,22 +109,26 @@ export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
   };
 
   return (
-    <ResponsiveContainer width="100%" height={350}>
+    <ResponsiveContainer width="100%" height={chartHeight}>
       <ComposedChart
         data={chartData}
         margin={{ top: 10, right: 10, bottom: 20, left: 10 }}
       >
         <CartesianGrid strokeDasharray="3 3" />
-        <XAxis dataKey="year" fontSize={11} />
+        <XAxis dataKey="year" fontSize={axisFontSize} />
         <YAxis
           tickFormatter={(v) => (v / 1000).toFixed(0) + "k"}
-          fontSize={11}
-          label={{
-            value: "kr/m²",
-            angle: -90,
-            position: "insideLeft",
-            style: { fontSize: 11 },
-          }}
+          fontSize={axisFontSize}
+          label={
+            isMobile
+              ? undefined
+              : {
+                  value: "kr/m²",
+                  angle: -90,
+                  position: "insideLeft",
+                  style: { fontSize: 11 },
+                }
+          }
         />
         <Tooltip content={<CustomTooltip />} />
         <Legend />
