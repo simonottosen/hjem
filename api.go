@@ -42,10 +42,10 @@ func NewServer(db *gorm.DB) *server {
 }
 
 type server struct {
-	dc          DawaCacher
-	bc          BoligaCacher
-	stats       *HealthStats
-	progress    *Progress
+	dc           DawaCacher
+	bc           BoligaCacher
+	stats        *HealthStats
+	progress     *Progress
 	cancelLookup context.CancelFunc
 }
 

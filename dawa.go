@@ -121,8 +121,8 @@ type dawaCacher struct {
 }
 
 type DawaQueryCache struct {
-	Query     string    `gorm:"primaryKey"`
-	IDs       string    `gorm:"not null"`
+	Query     string `gorm:"primaryKey"`
+	IDs       string `gorm:"not null"`
 	CreatedAt time.Time
 }
 

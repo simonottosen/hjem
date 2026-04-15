@@ -21,7 +21,7 @@ type HealthCache struct {
 type HealthBoliga struct {
 	LastOK       *time.Time `json:"last_ok,omitempty"`
 	LastFail     *time.Time `json:"last_fail,omitempty"`
-	ErrorRatePct float64   `json:"error_rate_pct"`
+	ErrorRatePct float64    `json:"error_rate_pct"`
 	TotalOK      int64      `json:"total_ok"`
 	TotalFail    int64      `json:"total_fail"`
 }
@@ -35,16 +35,16 @@ type HealthResponse struct {
 }
 
 type HealthStats struct {
-	mu           sync.Mutex
-	startedAt    time.Time
-	totalLookups int64
-	cacheHits    int64
-	cacheMisses  int64
-	boligaOK     int64
-	boligaFail   int64
-	boligaLastOK *time.Time
+	mu             sync.Mutex
+	startedAt      time.Time
+	totalLookups   int64
+	cacheHits      int64
+	cacheMisses    int64
+	boligaOK       int64
+	boligaFail     int64
+	boligaLastOK   *time.Time
 	boligaLastFail *time.Time
-	recentErrors []HealthError
+	recentErrors   []HealthError
 }
 
 func NewHealthStats() *HealthStats {

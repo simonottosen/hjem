@@ -125,7 +125,7 @@ export function SalesTable({
   }) {
     return (
       <TableHead
-        className="cursor-pointer select-none hover:bg-muted/50"
+        className="cursor-pointer select-none hover:bg-muted/50 min-h-[44px] py-3 sm:py-2"
         onClick={() => toggleSort(sortId)}
       >
         <span className="inline-flex items-center gap-1">
@@ -134,10 +134,10 @@ export function SalesTable({
             <Tooltip>
               <TooltipTrigger asChild>
                 <span
-                  className="inline-flex items-center justify-center size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help"
+                  className="inline-flex items-center justify-center size-6 sm:size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <Info className="size-2.5" />
+                  <Info className="size-3.5 sm:size-2.5" />
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top" className="max-w-[220px] text-xs font-normal">
@@ -157,7 +157,7 @@ export function SalesTable({
         <Table>
           <TableHeader className="sticky top-0 bg-card z-10">
             <TableRow>
-              <TableHead className="w-[32px]" />
+              <TableHead className="w-[44px] sm:w-[32px]" />
               <SortHeader label="Adresse" sortId="address" />
               <SortHeader label="Salgspris" sortId="amount" />
               <SortHeader label="kr/m²" sortId="sqmPrice" info="Salgspris divideret med boligens størrelse i kvadratmeter." />
@@ -187,14 +187,16 @@ export function SalesTable({
                         : ""
                   }
                 >
-                  <TableCell className="w-[32px] px-1">
+                  <TableCell className="w-[44px] sm:w-[32px] px-1">
                     {!isPrimary && (
-                      <input
-                        type="checkbox"
-                        checked={!s.excluded}
-                        onChange={() => onToggleExcluded(s.addr_idx)}
-                        className="size-3.5 rounded border-input accent-primary cursor-pointer"
-                      />
+                      <label className="flex items-center justify-center min-h-[44px] sm:min-h-0 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!s.excluded}
+                          onChange={() => onToggleExcluded(s.addr_idx)}
+                          className="size-4 sm:size-3.5 rounded border-input accent-primary cursor-pointer"
+                        />
+                      </label>
                     )}
                   </TableCell>
                   <TableCell
