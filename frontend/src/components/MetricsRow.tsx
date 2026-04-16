@@ -23,7 +23,7 @@ function InfoTip({ text }: { text: string }) {
           <Info className="size-2.5" />
         </span>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-[250px] text-xs font-normal">
+      <TooltipContent className="max-w-[250px] text-xs font-normal">
         {text}
       </TooltipContent>
     </Tooltip>

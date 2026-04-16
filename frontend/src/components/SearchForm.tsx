@@ -69,7 +69,7 @@ export function SearchForm({
                     <Info className="size-2.5" />
                   </span>
                 </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-[250px] text-xs">
+                <TooltipContent className="max-w-[250px] text-xs">
                   Fjerner salg der afviger kraftigt fra gennemsnittet i området.
                   Jo lavere sigma-værdi, jo flere afvigende salg filtreres fra.
                   Vælg "Ingen" for at se alle salg.
