@@ -291,25 +291,20 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 		return nil, warnings, fmt.Errorf("alle %d gade-opslag fejlede", failedReqs)
 	}
 
-	// Build lookup maps at multiple levels:
+	// Build lookup maps:
 	// 1. Exact address string match
-	// 2. Normalized string match (trim, lowercase, etc.)
-	// 3. Building-level match (street + number only) as fallback
+	// 2. Normalized string match (trim, lowercase, etc.) as fallback
+	// No building-level fallback — attributing a sale to a random apartment
+	// in the same building creates false duplicates.
 	z := map[string]int{}
 	zNorm := map[string]int{}
-	zBuilding := map[string]int{} // "street number" → first address index in that building
 	for i, addr := range addrs {
 		short := addr.Short()
 		z[short] = i
 		zNorm[normalizeAddr(short)] = i
-
-		building := fmt.Sprintf("%s %s", addr.StreetName, addr.StreetNumber)
-		if _, ok := zBuilding[building]; !ok {
-			zBuilding[building] = i
-		}
 	}
 
-	var exactMatches, normMatches, buildingMatches, skippedSaleType int
+	var exactMatches, normMatches, skippedSaleType int
 	result := make([][]BoligaSaleItem, len(addrs))
 	for i := range totalSales {
 		s := totalSales[i]
@@ -333,22 +328,10 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 			result[j] = append(result[j], s)
 			continue
 		}
-
-		// Fallback: building-level match (same street+number, different apartment)
-		// Extract building part from Boliga address ("Vejnavn 42, 3. tv" → "Vejnavn 42")
-		boligaBuilding := s.Addr
-		if idx := strings.Index(s.Addr, ","); idx > 0 {
-			boligaBuilding = strings.TrimSpace(s.Addr[:idx])
-		}
-		if j, ok := zBuilding[boligaBuilding]; ok {
-			buildingMatches++
-			result[j] = append(result[j], s)
-			continue
-		}
 	}
-	totalMatched := exactMatches + normMatches + buildingMatches
-	log.Printf("Boliga matched %d exact + %d normalized + %d building-level = %d/%d sales (skipped %d non-alm. salg)",
-		exactMatches, normMatches, buildingMatches,
+	totalMatched := exactMatches + normMatches
+	log.Printf("Boliga matched %d exact + %d normalized = %d/%d sales (skipped %d non-alm. salg)",
+		exactMatches, normMatches,
 		totalMatched, len(totalSales), skippedSaleType)
 
 	return result, warnings, nil
