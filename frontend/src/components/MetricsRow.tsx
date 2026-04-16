@@ -19,8 +19,8 @@ function InfoTip({ text }: { text: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex items-center justify-center size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help">
-          <Info className="size-2.5" />
+        <span className="inline-flex items-center justify-center size-6 sm:size-3.5 rounded-full bg-muted-foreground/20 text-muted-foreground cursor-help">
+          <Info className="size-3.5 sm:size-2.5" />
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-[250px] text-xs font-normal">

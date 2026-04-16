@@ -31,12 +31,12 @@ const (
 )
 
 type CompsEstimate struct {
-	Value      int    `json:"value"`       // Point estimate in DKK
-	SqmPrice   int    `json:"sqm_price"`   // Estimated price per m²
-	Low        int    `json:"low"`         // Lower bound
-	High       int    `json:"high"`        // Upper bound
-	Confidence string `json:"confidence"`  // "high", "medium", "low"
-	NumComps   int    `json:"num_comps"`   // Number of comparable sales used
+	Value      int    `json:"value"`      // Point estimate in DKK
+	SqmPrice   int    `json:"sqm_price"`  // Estimated price per m²
+	Low        int    `json:"low"`        // Lower bound
+	High       int    `json:"high"`       // Upper bound
+	Confidence string `json:"confidence"` // "high", "medium", "low"
+	NumComps   int    `json:"num_comps"`  // Number of comparable sales used
 }
 
 type compCandidate struct {
