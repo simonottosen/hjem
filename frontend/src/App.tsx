@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { Github } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { useSearch } from "@/hooks/useSearch";
 import { useProgress } from "@/hooks/useProgress";
 import { useFilteredData } from "@/hooks/useFilteredData";
@@ -20,7 +20,7 @@ function Footer() {
         rel="noopener noreferrer"
         className="inline-flex items-center gap-1 mt-1 hover:text-foreground transition-colors"
       >
-        <Github className="size-3" />
+        <ExternalLink className="size-3" />
         github.com/simonottosen/hjem
       </a>
     </footer>

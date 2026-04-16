@@ -111,12 +111,7 @@ export function ChartTooltipContent({
   formatter,
   nameKey,
   labelKey,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
-  React.ComponentProps<"div"> & {
-    hideLabel?: boolean
-    nameKey?: string
-    labelKey?: string
-  }) {
+}: any) {
   const { config } = useChart()
 
   const tooltipLabel = React.useMemo(() => {
@@ -146,7 +141,7 @@ export function ChartTooltipContent({
     >
       {tooltipLabel}
       <div className="grid gap-1.5">
-        {payload.map((item, index) => {
+        {payload.map((item: any, index: any) => {
           const key = `${nameKey ?? item.name ?? item.dataKey ?? "value"}`
           const itemConfig = config[key]
           const indicatorColor = item.payload?.fill ?? item.color
