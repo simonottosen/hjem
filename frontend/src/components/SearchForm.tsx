@@ -58,7 +58,7 @@ export function SearchForm({
           Søg
         </Button>
       </div>
-      <div className="flex gap-4">
+      <div className="flex flex-col sm:flex-row gap-2 sm:gap-4">
         <div className="flex-1 space-y-1">
           <label className="text-xs text-muted-foreground font-medium inline-flex items-center gap-1">
             Filtrering
