@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import type { LookupResponse } from "@/lib/types";
 import { formatDKK, formatDate } from "@/lib/formatting";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 interface PriceScatterChartProps {
   data: LookupResponse;
@@ -23,6 +24,9 @@ type ChartMode = "total" | "sqm";
 
 export function PriceScatterChart({ data }: PriceScatterChartProps) {
   const [mode, setMode] = useState<ChartMode>("total");
+  const isMobile = useMediaQuery("(max-width: 640px)");
+  const chartHeight = isMobile ? 250 : 350;
+  const axisFontSize = isMobile ? 10 : 11;
   const addrs = data.addresses ?? [];
   const sales = data.sales ?? [];
 
@@ -103,7 +107,7 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
           </button>
         </div>
       </div>
-      <ResponsiveContainer width="100%" height={350}>
+      <ResponsiveContainer width="100%" height={chartHeight}>
         <ScatterChart margin={{ top: 10, right: 10, bottom: 20, left: 10 }}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis
@@ -112,7 +116,7 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
             domain={["dataMin", "dataMax"]}
             tickFormatter={(v) => new Date(v).getFullYear().toString()}
             name="Dato"
-            fontSize={11}
+            fontSize={axisFontSize}
           />
           <YAxis
             type="number"
@@ -123,13 +127,17 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
                 : (v / 1000000).toFixed(1) + "M"
             }
             name={isSqm ? "kr/m²" : "Salgspris"}
-            fontSize={11}
-            label={{
-              value: isSqm ? "Pris pr. m² (kr)" : "Salgspris (DKK)",
-              angle: -90,
-              position: "insideLeft",
-              style: { fontSize: 11 },
-            }}
+            fontSize={axisFontSize}
+            label={
+              isMobile
+                ? undefined
+                : {
+                    value: isSqm ? "Pris pr. m² (kr)" : "Salgspris (DKK)",
+                    angle: -90,
+                    position: "insideLeft",
+                    style: { fontSize: 11 },
+                  }
+            }
           />
           <Tooltip content={<CustomTooltip />} />
           <Legend />
