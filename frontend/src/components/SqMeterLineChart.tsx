@@ -12,71 +12,70 @@ import {
 } from "recharts";
 import type { LookupResponse } from "@/lib/types";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import {
+  pickResolution,
+  enumerateBuckets,
+  bucketSqmStats,
+  projectionAnchors,
+  interpolateAt,
+  formatBucket,
+  formatTick,
+} from "@/lib/timeseries";
 
 interface SqMeterLineChartProps {
   data: LookupResponse;
+  /** Visible time window [startMs, endMs] from the shared zoom slider. */
+  range: [number, number];
 }
 
 const BLUE = "#4685e3";
 const AMBER = "#ffb700";
 const BAND_COLOR = "#4685e333";
 
-export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
+export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
   const isMobile = useMediaQuery("(max-width: 640px)");
   const chartHeight = isMobile ? 250 : 350;
   const axisFontSize = isMobile ? 10 : 11;
 
+  const res = pickResolution(range[1] - range[0]);
+
   const { chartData, projectionKeys } = useMemo(() => {
-    const globalEntries = Object.entries(data.sqmeters.global).sort(
-      ([a], [b]) => new Date(a).getTime() - new Date(b).getTime()
-    );
+    const addresses = data.addresses ?? [];
+    const sales = data.sales ?? [];
 
-    // Build base data from global aggregations
-    const yearMap: Record<
-      string,
-      Record<string, number | null | [number, number]>
-    > = {};
+    // Real kr/m² buckets at the zoomed resolution (gaps bridged by the line).
+    const stats = bucketSqmStats(addresses, sales, res);
 
-    for (const [dateStr, agg] of globalEntries) {
-      const year = new Date(dateStr).getFullYear().toString();
-      yearMap[year] = {
-        year: Number(year),
-        mean: agg.mean,
-        std: agg.std,
-        n: agg.n,
-        band: [agg.mean - agg.std, agg.mean + agg.std] as unknown as number,
-      };
-    }
+    // Yearly projection anchors, interpolated onto the same fine grid.
+    const projections = data.sqmeters.projections ?? [];
+    const anchors = projections.map(projectionAnchors);
+    const projKeys = projections.map((_, idx) => `proj_${idx}`);
 
-    // Add projections
-    const projKeys: string[] = [];
-    if (data.sqmeters.projections) {
-      data.sqmeters.projections.forEach((proj, idx) => {
-        const key = `proj_${idx}`;
-        projKeys.push(key);
-        for (const [dateStr, value] of Object.entries(proj)) {
-          const year = new Date(dateStr).getFullYear().toString();
-          if (!yearMap[year]) {
-            yearMap[year] = { year: Number(year) };
-          }
-          yearMap[year][key] = value;
-        }
+    const buckets = enumerateBuckets(range[0], range[1], res);
+    const rows = buckets.map((t) => {
+      const row: Record<string, number | null | [number, number]> = { t };
+      const agg = stats.get(t);
+      if (agg) {
+        row.mean = agg.mean;
+        row.std = agg.std;
+        row.n = agg.n;
+        row.band = [agg.mean - agg.std, agg.mean + agg.std];
+      }
+      anchors.forEach((a, idx) => {
+        row[projKeys[idx]] = interpolateAt(a, t);
       });
-    }
+      return row;
+    });
 
-    const sorted = Object.values(yearMap).sort(
-      (a, b) => (a.year as number) - (b.year as number)
-    );
-
-    return { chartData: sorted, projectionKeys: projKeys };
-  }, [data.sqmeters]);
+    return { chartData: rows, projectionKeys: projKeys };
+  }, [data.addresses, data.sales, data.sqmeters.projections, range, res]);
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
 
     return (
       <div className="rounded-lg border bg-background px-3 py-2 text-xs shadow-lg space-y-1">
-        <p className="font-semibold">{label}</p>
+        <p className="font-semibold">{formatBucket(Number(label), res)}</p>
         {payload.map((entry: any, i: number) => {
           if (entry.dataKey === "band" || entry.value == null) return null;
           if (entry.dataKey === "mean") {
@@ -115,7 +114,15 @@ export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
         margin={{ top: 10, right: 10, bottom: 20, left: 10 }}
       >
         <CartesianGrid strokeDasharray="3 3" />
-        <XAxis dataKey="year" fontSize={axisFontSize} />
+        <XAxis
+          dataKey="t"
+          type="number"
+          domain={range}
+          allowDataOverflow
+          scale="time"
+          tickFormatter={(v) => formatTick(v, res)}
+          fontSize={axisFontSize}
+        />
         <YAxis
           tickFormatter={(v) => (v / 1000).toFixed(0) + "k"}
           fontSize={axisFontSize}
@@ -139,6 +146,7 @@ export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
           stroke="none"
           legendType="none"
           tooltipType="none"
+          connectNulls
         />
         <Line
           type="monotone"
@@ -148,6 +156,7 @@ export function SqMeterLineChart({ data }: SqMeterLineChartProps) {
           strokeWidth={2}
           dot={{ r: 3 }}
           activeDot={{ r: 5 }}
+          connectNulls
         />
         {projectionKeys.map((key, idx) => (
           <Line

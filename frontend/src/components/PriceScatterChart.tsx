@@ -12,9 +12,12 @@ import {
 import type { LookupResponse } from "@/lib/types";
 import { formatDKK, formatDate } from "@/lib/formatting";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { pickResolution, formatTick } from "@/lib/timeseries";
 
 interface PriceScatterChartProps {
   data: LookupResponse;
+  /** Visible time window [startMs, endMs] from the shared zoom slider. */
+  range: [number, number];
 }
 
 const AMBER = "#ffb700";
@@ -22,7 +25,7 @@ const BLUE = "#4685e3";
 
 type ChartMode = "total" | "sqm";
 
-export function PriceScatterChart({ data }: PriceScatterChartProps) {
+export function PriceScatterChart({ data, range }: PriceScatterChartProps) {
   const [mode, setMode] = useState<ChartMode>("total");
   const isMobile = useMediaQuery("(max-width: 640px)");
   const chartHeight = isMobile ? 250 : 350;
@@ -35,12 +38,15 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
     const nearby: Array<Record<string, unknown>> = [];
 
     for (const s of sales) {
+      const date = new Date(s.when).getTime();
+      if (date < range[0] || date > range[1]) continue;
+
       const addr = addrs[s.addr_idx];
       const size = s.sq_meters > 0 ? s.sq_meters : (addr?.building_size ?? 0);
       const sqmPrice = size > 0 ? Math.round(s.amount / size) : null;
 
       const point = {
-        date: new Date(s.when).getTime(),
+        date,
         amount: s.amount,
         sqmPrice,
         size,
@@ -53,7 +59,7 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
       }
     }
     return { primaryData: primary, nearbyData: nearby };
-  }, [sales, addrs, data.primary_idx]);
+  }, [sales, addrs, data.primary_idx, range]);
 
   const isSqm = mode === "sqm";
   const valueKey = isSqm ? "sqmPrice" : "amount";
@@ -113,8 +119,9 @@ export function PriceScatterChart({ data }: PriceScatterChartProps) {
           <XAxis
             type="number"
             dataKey="date"
-            domain={["dataMin", "dataMax"]}
-            tickFormatter={(v) => new Date(v).getFullYear().toString()}
+            domain={range}
+            allowDataOverflow
+            tickFormatter={(v) => formatTick(v, pickResolution(range[1] - range[0]))}
             name="Dato"
             fontSize={axisFontSize}
           />
