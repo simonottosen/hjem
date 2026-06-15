@@ -46,15 +46,28 @@ export function TimeRangeSlider({ min, max, value, onChange }: TimeRangeSliderPr
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
-      const onMove = (ev: PointerEvent) => {
-        const pos = msFromClientX(ev.clientX);
+      // Coalesce pointer moves to at most one state update per animation
+      // frame so a burst of events can't outpace React's render and stall
+      // the drag. The chart redraw is deprioritised separately (deferred).
+      let latestX = e.clientX;
+      let raf: number | null = null;
+
+      const flush = () => {
+        raf = null;
+        const pos = msFromClientX(latestX);
         if (thumb === "start") {
           onChange([Math.min(pos, end - MIN_SPAN), end]);
         } else {
           onChange([start, Math.max(pos, start + MIN_SPAN)]);
         }
       };
+
+      const onMove = (ev: PointerEvent) => {
+        latestX = ev.clientX;
+        if (raf === null) raf = requestAnimationFrame(flush);
+      };
       const onUp = () => {
+        if (raf !== null) cancelAnimationFrame(raf);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
       };

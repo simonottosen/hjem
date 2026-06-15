@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import type { LookupResponse } from "@/lib/types";
 import { MetricsRow } from "./MetricsRow";
 import { PriceScatterChart } from "./PriceScatterChart";
@@ -71,6 +71,11 @@ export function DashboardLayout({
     setTimeRange([domainMin, domainMax]);
   }, [domainMin, domainMax]);
 
+  // The slider reads `timeRange` so its handles track the cursor instantly,
+  // while the heavy chart redraw runs against a deferred value at lower
+  // priority — so dragging never waits on the charts to re-render.
+  const chartRange = useDeferredValue(timeRange);
+
   return (
     <div className="space-y-4">
       {data.warnings && data.warnings.length > 0 && (
@@ -98,7 +103,7 @@ export function DashboardLayout({
             <CardTitle className="text-sm">Salgspriser over tid</CardTitle>
           </CardHeader>
           <CardContent>
-            <PriceScatterChart data={data} range={timeRange} />
+            <PriceScatterChart data={data} range={chartRange} />
           </CardContent>
         </Card>
 
@@ -109,7 +114,7 @@ export function DashboardLayout({
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <SqMeterLineChart data={data} range={timeRange} />
+            <SqMeterLineChart data={data} range={chartRange} />
           </CardContent>
         </Card>
       </div>
