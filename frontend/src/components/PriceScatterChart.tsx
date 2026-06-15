@@ -13,6 +13,7 @@ import type { LookupResponse } from "@/lib/types";
 import { formatDKK, formatDate } from "@/lib/formatting";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { pickResolution, formatTick } from "@/lib/timeseries";
+import { paddedYAxis } from "@/lib/axis";
 
 interface PriceScatterChartProps {
   data: LookupResponse;
@@ -63,6 +64,18 @@ export function PriceScatterChart({ data, range }: PriceScatterChartProps) {
 
   const isSqm = mode === "sqm";
   const valueKey = isSqm ? "sqmPrice" : "amount";
+
+  const yScale = useMemo(() => {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of [...primaryData, ...nearbyData]) {
+      const v = p[valueKey] as number | null;
+      if (v == null) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return paddedYAxis(min, max);
+  }, [primaryData, nearbyData, valueKey]);
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null;
@@ -128,6 +141,9 @@ export function PriceScatterChart({ data, range }: PriceScatterChartProps) {
           <YAxis
             type="number"
             dataKey={valueKey}
+            domain={yScale.domain}
+            ticks={yScale.ticks}
+            allowDataOverflow
             tickFormatter={(v) =>
               isSqm
                 ? (v / 1000).toFixed(0) + "k"

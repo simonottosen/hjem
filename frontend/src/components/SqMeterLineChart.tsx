@@ -21,6 +21,7 @@ import {
   formatBucket,
   formatTick,
 } from "@/lib/timeseries";
+import { paddedYAxis } from "@/lib/axis";
 
 interface SqMeterLineChartProps {
   data: LookupResponse;
@@ -39,7 +40,7 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
 
   const res = pickResolution(range[1] - range[0]);
 
-  const { chartData, projectionKeys } = useMemo(() => {
+  const { chartData, projectionKeys, yScale } = useMemo(() => {
     const addresses = data.addresses ?? [];
     const sales = data.sales ?? [];
 
@@ -51,6 +52,14 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
     const anchors = projections.map(projectionAnchors);
     const projKeys = projections.map((_, idx) => `proj_${idx}`);
 
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    const track = (v: number | null) => {
+      if (v == null) return;
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+    };
+
     const buckets = enumerateBuckets(range[0], range[1], res);
     const rows = buckets.map((t) => {
       const row: Record<string, number | null | [number, number]> = { t };
@@ -60,14 +69,18 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
         row.std = agg.std;
         row.n = agg.n;
         row.band = [agg.mean - agg.std, agg.mean + agg.std];
+        track(agg.mean - agg.std);
+        track(agg.mean + agg.std);
       }
       anchors.forEach((a, idx) => {
-        row[projKeys[idx]] = interpolateAt(a, t);
+        const v = interpolateAt(a, t);
+        row[projKeys[idx]] = v;
+        track(v);
       });
       return row;
     });
 
-    return { chartData: rows, projectionKeys: projKeys };
+    return { chartData: rows, projectionKeys: projKeys, yScale: paddedYAxis(yMin, yMax) };
   }, [data.addresses, data.sales, data.sqmeters.projections, range, res]);
 
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -124,6 +137,9 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
           fontSize={axisFontSize}
         />
         <YAxis
+          domain={yScale.domain}
+          ticks={yScale.ticks}
+          allowDataOverflow
           tickFormatter={(v) => (v / 1000).toFixed(0) + "k"}
           fontSize={axisFontSize}
           label={
