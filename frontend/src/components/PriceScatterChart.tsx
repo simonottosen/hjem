@@ -154,6 +154,7 @@ export function PriceScatterChart({ data, range }: PriceScatterChartProps) {
             fill={BLUE}
             opacity={0.5}
             r={3}
+            isAnimationActive={false}
           />
           <Scatter
             name={primaryAddr?.full_txt ?? "Søgt adresse"}
@@ -163,6 +164,7 @@ export function PriceScatterChart({ data, range }: PriceScatterChartProps) {
             strokeWidth={1}
             r={5}
             shape="diamond"
+            isAnimationActive={false}
           />
         </ScatterChart>
       </ResponsiveContainer>

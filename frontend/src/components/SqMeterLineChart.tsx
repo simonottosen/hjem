@@ -147,6 +147,7 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
           legendType="none"
           tooltipType="none"
           connectNulls
+          isAnimationActive={false}
         />
         <Line
           type="monotone"
@@ -157,6 +158,7 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
           dot={{ r: 3 }}
           activeDot={{ r: 5 }}
           connectNulls
+          isAnimationActive={false}
         />
         {projectionKeys.map((key, idx) => (
           <Line
@@ -169,6 +171,7 @@ export function SqMeterLineChart({ data, range }: SqMeterLineChartProps) {
             strokeDasharray="5 2"
             dot={false}
             connectNulls
+            isAnimationActive={false}
           />
         ))}
       </ComposedChart>
