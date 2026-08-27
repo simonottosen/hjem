@@ -404,3 +404,216 @@ func TestAVEnrichBatches(t *testing.T) {
 		}
 	}
 }
+
+// --- Fallback chain (issues #18, #19) ------------------------------------
+
+// TestAVStreetVariants pins the re-spelling generator: street-name only, most
+// conservative candidate first, case preserved, bounded.
+func TestAVStreetVariants(t *testing.T) {
+	t.Run("varies only the street name", func(t *testing.T) {
+		got := avStreetVariants("Norrebrogade 155, 2200 Kobenhavn N")
+		if len(got) == 0 {
+			t.Fatal("no variants generated")
+		}
+		// The correct spelling must be tried first — it is the likeliest fix
+		// and every later candidate costs another request.
+		want := "Nørrebrogade 155, 2200 Kobenhavn N"
+		if got[0] != want {
+			t.Errorf("first variant = %q, want %q", got[0], want)
+		}
+		// "Kobenhavn" must be left alone: the postnummer already identifies the
+		// town, and varying it would multiply the search space for nothing.
+		for _, v := range got {
+			if !strings.Contains(v, "Kobenhavn N") {
+				t.Errorf("variant altered text after the house number: %q", v)
+			}
+		}
+	})
+
+	t.Run("preserves case", func(t *testing.T) {
+		got := avStreetVariants("Osterbrogade 54, 2100 Kobenhavn O")
+		if len(got) == 0 || !strings.HasPrefix(got[0], "Østerbrogade") {
+			t.Fatalf("want a leading uppercase Ø, got %q", got)
+		}
+	})
+
+	t.Run("handles digraphs", func(t *testing.T) {
+		got := avStreetVariants("Noerrebrogade 155, 2200")
+		if len(got) == 0 || got[0] != "Nørrebrogade 155, 2200" {
+			t.Fatalf(`want "oe" collapsed to "ø" first, got %q`, got)
+		}
+	})
+
+	t.Run("is bounded", func(t *testing.T) {
+		got := avStreetVariants("Aaaaoooo 1, 1000 X")
+		if len(got) > avMaxVariants {
+			t.Errorf("generated %d variants, cap is %d", len(got), avMaxVariants)
+		}
+	})
+
+	t.Run("no house number means all street", func(t *testing.T) {
+		if got := avStreetVariants("Norrebrogade"); len(got) == 0 {
+			t.Error("expected variants for a bare street name")
+		}
+	})
+}
+
+// avChainServer serves the fallback chain. soeg answers a hit only for the
+// queries in hits; /vask/ returns vaskJSON; /adresser/{id} returns the address
+// fixture. Every request path is recorded.
+func avChainServer(t *testing.T, hits map[string]string, vaskJSON string) *[]string {
+	t.Helper()
+	var calls []string
+
+	avTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		calls = append(calls, r.URL.Path)
+
+		switch {
+		case r.URL.Path == "/adresser/soeg":
+			tekst := r.URL.Query().Get("tekst")
+			id, ok := hits[tekst]
+			if !ok {
+				w.Write([]byte(`{"status":"ok","beskrivelse":"","fund":[]}`))
+				return
+			}
+			fmt.Fprintf(w, `{"status":"ok","fund":[{"type":"adresse","id":%q,"titel":%q}]}`, id, tekst)
+
+		case r.URL.Path == "/vask/":
+			if vaskJSON == "" {
+				w.Write([]byte(`{"vaskestatus":{"kode":-1000,"tekst":"Tekst kan ikke genkendes som en adresse"},` +
+					`"vaskeresultat":{"adresse_id_lokalid":null,"adressebetegnelse":null,"status":null},` +
+					`"vaskeresultat_historisk":{"adressebetegnelse":null}}`))
+				return
+			}
+			w.Write([]byte(vaskJSON))
+
+		case strings.HasPrefix(r.URL.Path, "/adresser/"):
+			w.Write([]byte(avAddressFixture))
+
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+		}
+	})
+
+	return &calls
+}
+
+// TestAVTransliterationFallback is the #19 regression guard: an address typed
+// without Danish characters must still resolve.
+func TestAVTransliterationFallback(t *testing.T) {
+	const id = "70865c44-d570-44e7-a6f5-6f7c90add725"
+	calls := avChainServer(t, map[string]string{
+		// Only the correctly spelled query hits, as the live service behaves.
+		"Rådhuspladsen 1, 1550 Kobenhavn V": id,
+	}, "")
+
+	addrs, err := AVFuzzySearch{Query: "Radhuspladsen 1, 1550 Kobenhavn V"}.Fetch()
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(addrs) != 1 {
+		t.Fatalf("got %d addresses, want 1", len(addrs))
+	}
+	if addrs[0].StreetName != "Rådhuspladsen" {
+		t.Errorf("StreetName = %q, want %q", addrs[0].StreetName, "Rådhuspladsen")
+	}
+
+	// It must not have needed Adressevask for a mere spelling problem.
+	for _, p := range *calls {
+		if p == "/vask/" {
+			t.Error("fell through to /vask/ when a re-spelling already matched")
+		}
+	}
+}
+
+// TestAVVaskFallback is the #18 regression guard: a historical designation that
+// phonetic search cannot find must resolve through Adressevask.
+func TestAVVaskFallback(t *testing.T) {
+	const id = "70865c44-d570-44e7-a6f5-6f7c90add725"
+	vask := fmt.Sprintf(`{
+	  "vaskestatus":{"kode":1000,"tekst":"Eksakt match"},
+	  "vaskeresultat":{"adresse_id_lokalid":%q,"adressebetegnelse":"Rådhuspladsen 1, 1550 København V","status":3},
+	  "vaskeresultat_historisk":{"adressebetegnelse":"Gammel Plads 1, 1550 København V"}
+	}`, id)
+
+	// No soeg query hits, forcing the chain all the way to /vask/.
+	calls := avChainServer(t, map[string]string{}, vask)
+
+	addrs, err := AVFuzzySearch{Query: "Gammel Plads 1, 1550 København V"}.Fetch()
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(addrs) != 1 {
+		t.Fatalf("got %d addresses, want 1", len(addrs))
+	}
+
+	var sawVask bool
+	for _, p := range *calls {
+		if p == "/vask/" {
+			sawVask = true
+		}
+	}
+	if !sawVask {
+		t.Error("never called /vask/")
+	}
+}
+
+// TestAVVaskNedlagtRejected covers the explicit product rule: a decommissioned
+// address is an error, not a result. The lookup must be skipped entirely —
+// /adresser/{id} answers 404 for a nedlagt address, so continuing would replace
+// a meaningful message with an opaque one.
+func TestAVVaskNedlagtRejected(t *testing.T) {
+	vask := `{
+	  "vaskestatus":{"kode":1000,"tekst":"Eksakt match"},
+	  "vaskeresultat":{"adresse_id_lokalid":"0a3f50c4-a051-32b8-e044-0003ba298018",
+	                   "adressebetegnelse":"Vestergade 1A, 8000 Aarhus C","status":4},
+	  "vaskeresultat_historisk":{"adressebetegnelse":"Vestergade 1, 8000 Aarhus C"}
+	}`
+	calls := avChainServer(t, map[string]string{}, vask)
+
+	_, err := AVFuzzySearch{Query: "Vestergade 1, 8000 Aarhus C"}.Fetch()
+	if err == nil {
+		t.Fatal("expected a nedlagt address to be rejected, got nil error")
+	}
+	if !strings.Contains(err.Error(), "nedlagt") {
+		t.Errorf("error should name the cause, got %q", err)
+	}
+
+	for _, p := range *calls {
+		if strings.HasPrefix(p, "/adresser/") && p != "/adresser/soeg" {
+			t.Errorf("looked up a nedlagt address at %s; it should have been rejected first", p)
+		}
+	}
+}
+
+// TestAVAddressNedlagtRejected covers the same rule on the search path, which
+// previously had no status check at all.
+func TestAVAddressNedlagtRejected(t *testing.T) {
+	avTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/adresser/soeg" {
+			w.Write([]byte(`{"status":"ok","fund":[{"type":"adresse","id":"abc","titel":"Vestergade 1A"}]}`))
+			return
+		}
+		w.Write([]byte(strings.Replace(avAddressFixture, `"status": "3"`, `"status": "4"`, 1)))
+	})
+
+	if _, err := (AVFuzzySearch{Query: "Vestergade 1A, 8000 Aarhus C"}).Fetch(); err == nil {
+		t.Fatal("expected a nedlagt address to be rejected, got nil error")
+	}
+}
+
+// TestAVChainExhausted confirms a genuine miss is still not an error: api.go
+// renders an empty result as "no found address".
+func TestAVChainExhausted(t *testing.T) {
+	avChainServer(t, map[string]string{}, "")
+
+	addrs, err := AVFuzzySearch{Query: "ikke en adresse overhovedet"}.Fetch()
+	if err != nil {
+		t.Fatalf("an exhausted chain should not error, got %v", err)
+	}
+	if len(addrs) != 0 {
+		t.Fatalf("got %d addresses, want 0", len(addrs))
+	}
+}

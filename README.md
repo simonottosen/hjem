@@ -162,7 +162,7 @@ Request body:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `q` | string | Danish address query string (phonetically matched via Adressevælgeren) |
+| `q` | string | Danish address query string (see [Address resolution](#address-resolution)) |
 | `ranges` | array of int | Search radii in metres, e.g. `[250, 500]` |
 | `filter_below_std` | int | IQR multiplier for outlier filtering. `0` disables filtering. `1` uses multiplier `1.5` (strict), `2` uses `2.0`, `3` uses `2.5` (lenient) |
 
@@ -277,13 +277,36 @@ Dingeo aggregates valuations from multiple external models including the Danish 
 | Source | What it provides | API |
 |--------|-----------------|-----|
 | [Boliga.dk](https://www.boliga.dk) | Historical sale prices, property size, rooms, build year | `https://api.boliga.dk/api/v2/sold/search/results` |
-| [Adressevælgeren](https://adressevaelger.dk) | Free-text (phonetic) address search, and street/postal/municipality lookup by address id | `https://adressevaelger.dk/adresser` |
+| [Adressevælgeren](https://adressevaelger.dk) | Free-text (phonetic) address search, historical-address washing, and street/postal/municipality lookup by address id | `https://adressevaelger.dk/adresser`, `https://adressevaelger.dk/vask/` |
 | [Datafordeleren (DAR)](https://datafordeler.dk) | Nearby-address radius search over the official address register | `https://graphql.datafordeler.dk/DAR/v3` |
 | [Dingeo](https://www.dingeo.dk) | Aggregated public valuation models | Via FlareSolverr or direct request |
 
 Address data previously came from [DAWA](https://dawadocs.dataforsyningen.dk), which is being retired: free-text autocomplete was withdrawn on 17 Aug 2026 and the service shuts down entirely on 1 Oct 2026. Klimadatastyrelsen's [mapping guide](https://confluence.kds.dk/display/DML/Mapning+fra+DAWA+til+Datafordeleren) splits the replacement across two services, which is why both appear above: Datafordeleren's DAR GraphQL only supports exact matching (`eq`/`in`/`startsWith`) and cannot do free-text search, while Adressevælgeren has no radius search.
 
 Coordinates from both services are EPSG:25832 (ETRS89 / UTM zone 32N) easting/northing in metres, not WGS84 degrees; `datafordeler.go` projects them.
+
+### Address resolution
+
+A query is resolved to exactly one address id by `adressevaelger.go`, trying three
+steps in order and stopping at the first hit:
+
+1. **Phonetic search** (`/adresser/soeg`) — case-insensitive, implicit wildcard.
+   Handles ordinary typos and partial input.
+2. **Re-spelling** — the same search retried with Danish letters restored in the
+   street name (`Norrebrogade` → `Nørrebrogade`, `Osterbrogade` → `Østerbrogade`).
+   Phonetic search returns nothing for ASCII spellings, which is common when typing
+   on a non-Danish keyboard. Only the street name is varied; the postal code already
+   disambiguates the town.
+3. **Adressevask** (`/vask/`) — the only endpoint that knows superseded address
+   designations, so it resolves historical input such as a street number that has
+   since been renumbered. It requires a full address including postal code.
+
+The resolved address is rejected if its DAR lifecycle status is *nedlagt*
+(decommissioned) — the address no longer exists, so silently returning its
+replacement would attribute sales to the wrong property. Other non-current statuses
+are accepted; *foreløbig* in particular is a real address for a building under
+construction. A query that survives all three steps without a hit is reported as
+not found.
 
 ### What Boliga data includes
 
