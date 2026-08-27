@@ -1,6 +1,6 @@
 # Hjem
 
-A Danish property valuation tool. Enter any Danish address and a search radius, and Hjem aggregates recent sales from [Boliga.dk](https://www.boliga.dk), canonical address data from [DAWA](https://api.dataforsyningen.dk), and public valuations from [Dingeo](https://www.dingeo.dk) to produce three independent price estimates.
+A Danish property valuation tool. Enter any Danish address and a search radius, and Hjem aggregates recent sales from [Boliga.dk](https://www.boliga.dk), canonical address data from [Datafordeleren](https://datafordeler.dk) and [Adressevælgeren](https://adressevaelger.dk), and public valuations from [Dingeo](https://www.dingeo.dk) to produce three independent price estimates.
 
 Built for home buyers who want a data-driven baseline before negotiating — without relying solely on an estate agent's appraisal.
 
@@ -18,7 +18,7 @@ Built for home buyers who want a data-driven baseline before negotiating — wit
 - **Whole-building sale removal** — automatically discards bulk portfolio transactions where the same total price appears across three or more apartments at the same address on the same date
 - **Year-over-year change** — shown for the most recent sale, estimated value, and DKK/m²
 - **Partial results with warnings** — if some streets fail to fetch, available data is returned alongside a warning rather than aborting
-- **Caching** — Boliga data is cached for 10 days in PostgreSQL or SQLite; DAWA query results are cached for one year
+- **Caching** — Boliga data is cached for 10 days in PostgreSQL or SQLite; address query results are cached for one year
 
 ## Quick Start with Docker
 
@@ -127,6 +127,10 @@ The multi-stage Dockerfile builds the React frontend with Node 22 Alpine, then c
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `DATAFORDELER_API_KEY` | **Yes** | — | API key for [Datafordeleren](https://datafordeler.dk), used for nearby-address radius search. The server refuses to start without it |
+| `DATAFORDELER_GRAPHQL_URL` | No | `https://graphql.datafordeler.dk/DAR/v3` | Override the DAR GraphQL endpoint |
+| `ADRESSEVAELGER_TOKEN` | No | `adressevaelger123` | Token for [Adressevælgeren](https://adressevaelger.dk). The parameter is mandatory on every request, but user management is not yet implemented, so the documented public token is the default |
+| `ADRESSEVAELGER_URL` | No | `https://adressevaelger.dk` | Override the Adressevælger base URL |
 | `POSTGRES_PASSWORD` | No | — | Enables PostgreSQL. If set, the server connects to PostgreSQL instead of SQLite |
 | `POSTGRES_HOST` | No | `localhost` | PostgreSQL host |
 | `POSTGRES_PORT` | No | `8777` | PostgreSQL port |
@@ -158,7 +162,7 @@ Request body:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `q` | string | Danish address query string (fuzzy-matched via DAWA) |
+| `q` | string | Danish address query string (phonetically matched via Adressevælgeren) |
 | `ranges` | array of int | Search radii in metres, e.g. `[250, 500]` |
 | `filter_below_std` | int | IQR multiplier for outlier filtering. `0` disables filtering. `1` uses multiplier `1.5` (strict), `2` uses `2.0`, `3` uses `2.5` (lenient) |
 
@@ -187,6 +191,8 @@ Returns the current stage and, once complete, the full result payload.
 ```
 
 Progress stages in order: `idle` → `dawa` → `boliga_list` → `done` (or `error`).
+
+The `dawa` stage name is kept for wire compatibility with existing frontend builds; it now covers the Adressevælgeren and Datafordeleren lookups.
 
 The `result` field is populated only when `stage` is `"done"`.
 
@@ -271,8 +277,13 @@ Dingeo aggregates valuations from multiple external models including the Danish 
 | Source | What it provides | API |
 |--------|-----------------|-----|
 | [Boliga.dk](https://www.boliga.dk) | Historical sale prices, property size, rooms, build year | `https://api.boliga.dk/api/v2/sold/search/results` |
-| [DAWA](https://dawadocs.dataforsyningen.dk) | Canonical Danish address registry, geocoordinates, nearby address search | `https://api.dataforsyningen.dk/adresser` |
+| [Adressevælgeren](https://adressevaelger.dk) | Free-text (phonetic) address search, and street/postal/municipality lookup by address id | `https://adressevaelger.dk/adresser` |
+| [Datafordeleren (DAR)](https://datafordeler.dk) | Nearby-address radius search over the official address register | `https://graphql.datafordeler.dk/DAR/v3` |
 | [Dingeo](https://www.dingeo.dk) | Aggregated public valuation models | Via FlareSolverr or direct request |
+
+Address data previously came from [DAWA](https://dawadocs.dataforsyningen.dk), which is being retired: free-text autocomplete was withdrawn on 17 Aug 2026 and the service shuts down entirely on 1 Oct 2026. Klimadatastyrelsen's [mapping guide](https://confluence.kds.dk/display/DML/Mapning+fra+DAWA+til+Datafordeleren) splits the replacement across two services, which is why both appear above: Datafordeleren's DAR GraphQL only supports exact matching (`eq`/`in`/`startsWith`) and cannot do free-text search, while Adressevælgeren has no radius search.
+
+Coordinates from both services are EPSG:25832 (ETRS89 / UTM zone 32N) easting/northing in metres, not WGS84 degrees; `datafordeler.go` projects them.
 
 ### What Boliga data includes
 
@@ -301,7 +312,9 @@ go test ./...
 ├── api.go           # HTTP routes and lookup orchestration
 ├── boliga.go        # Boliga.dk scraper with 10-day DB caching
 ├── comps.go         # Gaussian-weighted comparable sales estimation
-├── dawa.go          # DAWA address API integration
+├── adressevaelger.go # Adressevælgeren free-text search and address enrichment
+├── datafordeler.go  # Datafordeleren DAR radius search and EPSG:25832 projection
+├── dawa.go          # Legacy DAWA client, retained only for cmd/compare-radius
 ├── dingeo.go        # Dingeo + FlareSolverr valuation fetcher
 ├── health.go        # /api/health and /metrics handlers
 ├── http.go          # Shared HTTP client with retry/backoff logic
@@ -327,7 +340,7 @@ go test ./...
 
 ## Asynchronous Request Model
 
-Lookups do not block the HTTP response. When the frontend sends `POST /api/lookup`, the server spawns a goroutine and returns `202 Accepted` immediately. The frontend polls `GET /api/progress` every ~500 ms. The server writes to a `Progress` struct as each stage completes (DAWA lookup, Boliga fetch, estimation, Dingeo). This avoids timeout issues with long-running reverse-proxy setups.
+Lookups do not block the HTTP response. When the frontend sends `POST /api/lookup`, the server spawns a goroutine and returns `202 Accepted` immediately. The frontend polls `GET /api/progress` every ~500 ms. The server writes to a `Progress` struct as each stage completes (address lookup, Boliga fetch, estimation, Dingeo). This avoids timeout issues with long-running reverse-proxy setups.
 
 If a new lookup is submitted before the previous one finishes, the previous goroutine's context is cancelled and its result is discarded.
 

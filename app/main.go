@@ -21,6 +21,7 @@ func main() {
 	flag.Parse()
 
 	log.Println("Starting hjem...")
+	requireAddressConfig()
 	db, dbName := connectDB(*dbFile)
 
 	s := hjem.NewServer(db)
@@ -31,6 +32,19 @@ func main() {
 	fmt.Printf("Server started on http://localhost:%d\n", *port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *port), s.Routes()); err != nil {
 		fmt.Println("Error starting server:", err)
+	}
+}
+
+// requireAddressConfig fails fast on missing address-service configuration.
+// Since the DAWA cutover, every nearby-address lookup goes to Datafordeleren,
+// which requires an API key. Without one the server still boots but each lookup
+// dies mid-request with an opaque error, so refuse to start instead.
+func requireAddressConfig() {
+	if os.Getenv("DATAFORDELER_API_KEY") == "" {
+		log.Println("FATAL: DATAFORDELER_API_KEY is not set.")
+		log.Println("  Nearby-address search uses Datafordeleren (DAR GraphQL), which requires an API key.")
+		log.Println("  Register at https://datafordeler.dk and export DATAFORDELER_API_KEY=<key>.")
+		os.Exit(1)
 	}
 }
 

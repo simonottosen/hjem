@@ -94,7 +94,7 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 	cancelled := func() bool { return ctx.Err() != nil }
 
 	s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
-	addrs, err := s.dc.Do(DawaFuzzySearch{
+	addrs, err := s.dc.Do(AVFuzzySearch{
 		Query: query,
 	})
 	if err != nil {
@@ -102,7 +102,7 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 		return
 	}
 	if cancelled() {
-		log.Printf("Lookup cancelled after DAWA search for %q", query)
+		log.Printf("Lookup cancelled after address search for %q", query)
 		return
 	}
 
@@ -197,7 +197,7 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			// handle error
 		}
 
-		addrs, err := s.dc.Do(DawaFuzzySearch{
+		addrs, err := s.dc.Do(AVFuzzySearch{
 			Query: query,
 		})
 		if err != nil {
@@ -311,7 +311,7 @@ func (s *server) Routes() *http.ServeMux {
 func (s *server) constructRanges(addr *Address, nearby []int) (map[int][]*Address, error) {
 	o := make(map[int][]*Address)
 	for _, r := range nearby {
-		addrs, err := s.dc.Do(DawaNearbySearch{
+		addrs, err := s.dc.Do(DARNearbySearch{
 			Addr:   *addr,
 			Meters: r,
 		})

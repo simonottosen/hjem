@@ -180,3 +180,6 @@ go.work.sum
 # Built binary
 main
 hjem
+
+# macOS
+.DS_Store

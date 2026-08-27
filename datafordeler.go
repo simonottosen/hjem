@@ -374,6 +374,18 @@ func (d DARNearbySearch) Fetch() ([]*Address, error) {
 		}
 	}
 	log.Printf("DAR step 3: %d addresses (%d after status-filter)", total, len(out))
+
+	// Step 4: street name, postal code and municipality code live on separate
+	// DAR entities (DAR_NavngivenVej, DAR_Postnummer, DAR_NavngivenVejKommunedel)
+	// reached through flat foreign keys, so DAR would need three further batched
+	// round-trips per result set. Adressevælgeren returns the whole nested
+	// husnummer record — vejnavn, husnummertekst, postnr and kommune — in one
+	// call per 100 ids, so resolve them there instead. See avEnrichAddresses for
+	// why these fields are load-bearing rather than cosmetic.
+	if err := avEnrichAddresses(out); err != nil {
+		return nil, err
+	}
+
 	return out, nil
 }
 

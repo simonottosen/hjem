@@ -187,6 +187,13 @@ func (c dawaCacher) Do(req DawaRequest) ([]*Address, error) {
 		}
 
 		addrs, err := req.Fetch()
+		if err != nil {
+			// Never cache a failed fetch. The entry would be empty and would be
+			// served for the full MaxAge (365 days), turning a transient outage
+			// into a permanent "no results" for that query.
+			return nil, err
+		}
+
 		if err := c.safeCreateOrGetAddrs(addrs); err != nil {
 			return nil, err
 		}
@@ -196,7 +203,7 @@ func (c dawaCacher) Do(req DawaRequest) ([]*Address, error) {
 			return nil, err
 		}
 
-		return addrs, err
+		return addrs, nil
 	}
 
 	var addrs []*Address
@@ -316,31 +323,14 @@ func reqToAddrs(req *http.Request) ([]*Address, error) {
 	return output, nil
 }
 
-type DawaFuzzySearch struct {
-	Query string
-}
-
-func (dfs DawaFuzzySearch) Request() *http.Request {
-	req, err := http.NewRequest("GET", addrEndpoint, nil)
-	if err != nil {
-		return nil
-	}
-
-	q := req.URL.Query()
-	q.Add("q", dfs.Query)
-	req.URL.RawQuery = q.Encode()
-
-	return req
-}
-
-func (dfs DawaFuzzySearch) Fetch() ([]*Address, error) {
-	req := dfs.Request()
-	return reqToAddrs(req)
-}
-
-func (dfs DawaFuzzySearch) MaxAge() time.Duration {
-	return 365 * 24 * time.Hour
-}
+// DawaFuzzySearch is gone: DAWA's free-text `q=` search was withdrawn on
+// 17 Aug 2026. Its replacement is AVFuzzySearch (Adressevælgeren), in
+// adressevaelger.go.
+//
+// DawaNearbySearch below is retained only so cmd/compare-radius can still A/B
+// the DAR radius search against DAWA's `cirkel=` for as long as DAWA answers
+// (full shutdown 1 Oct 2026). No production path uses it — api.go's
+// constructRanges calls DARNearbySearch.
 
 type DawaNearbySearch struct {
 	Addr   Address

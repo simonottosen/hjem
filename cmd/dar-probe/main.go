@@ -30,10 +30,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	centres, err := hjem.DawaFuzzySearch{Query: *addr}.Fetch()
+	centres, err := hjem.AVFuzzySearch{Query: *addr}.Fetch()
 	must(err)
 	if len(centres) == 0 {
-		fmt.Fprintln(os.Stderr, "no DAWA match")
+		fmt.Fprintln(os.Stderr, "no address match")
 		os.Exit(1)
 	}
 	c := centres[0]

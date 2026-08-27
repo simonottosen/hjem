@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-**Hjem** is a Danish property valuation tool. Users enter an address and a radius, and the app aggregates recent sales data from Boliga.dk, address data from DAWA, and public valuations from Dingeo to produce three estimates: comparable sales (comps), square-meter average, and public valuations.
+**Hjem** is a Danish property valuation tool. Users enter an address and a radius, and the app aggregates recent sales data from Boliga.dk, address data from Datafordeleren (DAR) and Adressevælgeren, and public valuations from Dingeo to produce three estimates: comparable sales (comps), square-meter average, and public valuations.
 
 ## Commands
 
@@ -33,6 +33,10 @@ docker run -p 8080:8080 hjem
 ```
 
 ### Environment variables
+- `DATAFORDELER_API_KEY` — **required**. Datafordeleren API key for the nearby-address radius search; the server refuses to boot without it
+- `DATAFORDELER_GRAPHQL_URL` — override the DAR GraphQL endpoint (default `https://graphql.datafordeler.dk/DAR/v3`)
+- `ADRESSEVAELGER_TOKEN` — Adressevælger token (default: the documented public `adressevaelger123`; the parameter is mandatory but not yet tied to an account)
+- `ADRESSEVAELGER_URL` — override the Adressevælger base URL (used by tests to point at an httptest server)
 - `POSTGRES_PASSWORD` — if set, uses PostgreSQL instead of SQLite (also needs `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_DB`)
 - `FLARESOLVERR_URL` — enables Dingeo valuation fetching (bypasses Cloudflare)
 
@@ -43,7 +47,7 @@ docker run -p 8080:8080 hjem
 2. Backend spawns a goroutine running `runLookup()` in `api.go`
 3. Frontend polls `GET /api/progress` every ~500ms until `done: true`
 4. Backend updates a `Progress` struct (in `progress.go`) as each stage completes:
-   - DAWA fuzzy address lookup → nearby addresses in radius
+   - Adressevælger free-text address lookup → DAR radius search for nearby addresses
    - Boliga sales scrape (cached 10 days in DB via GORM)
    - Comps estimation (weighted by recency, size, rooms, age, distance)
    - Square-meter aggregation by year
@@ -52,7 +56,9 @@ docker run -p 8080:8080 hjem
 ### Backend files
 - `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration
 - `boliga.go` — Boliga.dk scraper with DB caching
-- `dawa.go` — DAWA (Danish address API) integration
+- `adressevaelger.go` — Adressevælgeren: free-text address search, plus batch enrichment of DAR results with street/postal/municipality
+- `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection
+- `dawa.go` — legacy DAWA client. Only `DawaNearbySearch` remains, used solely by `cmd/compare-radius`
 - `dingeo.go` — Dingeo + FlareSolverr valuation scraper
 - `comps.go` — Gaussian-weighted comparable sales estimation
 - `math.go` — IQR outlier filtering, year-over-year stats

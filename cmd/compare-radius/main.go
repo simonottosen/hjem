@@ -151,10 +151,10 @@ func main() {
 	}
 }
 
-// resolveCenter resolves a free-text address to a single centre Address via DAWA
-// fuzzy search, taking the first (best) match.
+// resolveCenter resolves a free-text address to a single centre Address via
+// Adressevaelgeren, taking the first (best) match.
 func resolveCenter(query string) (*hjem.Address, error) {
-	addrs, err := hjem.DawaFuzzySearch{Query: query}.Fetch()
+	addrs, err := hjem.AVFuzzySearch{Query: query}.Fetch()
 	if err != nil {
 		return nil, err
 	}
