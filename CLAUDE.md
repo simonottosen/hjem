@@ -56,7 +56,7 @@ docker run -p 8080:8080 hjem
 ### Backend files
 - `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration
 - `boliga.go` — Boliga.dk scraper with DB caching
-- `adressevaelger.go` — Adressevælgeren: free-text address search, plus batch enrichment of DAR results with street/postal/municipality
+- `adressevaelger.go` — Adressevælgeren: free-text address search (phonetic → ASCII re-spelling → `/vask/` for historical designations; dead addresses and interval matches are rejected rather than substituted), plus batch enrichment of DAR results with street/postal/municipality
 - `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection
 - `dawa.go` — legacy DAWA client. Only `DawaNearbySearch` remains, used solely by `cmd/compare-radius`
 - `dingeo.go` — Dingeo + FlareSolverr valuation scraper

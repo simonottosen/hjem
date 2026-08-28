@@ -25,6 +25,20 @@ import (
 //  2. GET /adresser/{id} — the full record. The husnummer payload is nested in
 //     the response, so this single call yields coordinates, street name, postal
 //     code and municipality code; no separate /husnumre/{id} call is needed.
+//
+// Step 1 has two blind spots, both of which return zero hits and are therefore
+// indistinguishable from a genuinely nonexistent address. avResolveID works
+// around them in order of how often they bite:
+//
+//   - Danish letters typed as ASCII ("Norrebrogade"). Retried against the same
+//     search with ø/æ/å restored — see avStreetVariants.
+//   - Historical designations ("Vestergade 1" after renumbering to "1A").
+//     Retried against /vask/ (Adressevask), which is the only endpoint that
+//     knows superseded betegnelser — see avVask.
+//
+// The two overlap, so the respelled variants are tried against /vask/ as well.
+// Whatever the step, the resolved address is only returned if its DAR lifecycle
+// status says it exists — see avStatusAccepted.
 const (
 	avDefaultBaseURL = "https://adressevaelger.dk"
 
@@ -43,7 +57,67 @@ const (
 	// line with HTTP 431: 300 ids still succeed, 500 do not. 100 leaves a wide
 	// margin and matches darInLimit.
 	avBatchSize = 100
+
+	// avMaxVariants caps how many transliterated spellings are tried after a
+	// miss. Each costs one request, and they are only issued on a path that has
+	// already failed, so the cap trades a slower miss for a better hit rate.
+	// Streets needing more than a handful of substitutions are vanishingly rare.
+	avMaxVariants = 8
+
+	// Adressevask vaskestatus codes. Positive is a match, negative a failure;
+	// the two differ in kind, so only the ones acted on are named here.
+	//
+	// 1000 and 900 are the only codes that identify one specific house number
+	// (900 merely allowed a spelling variation in the street name). Notably 800
+	// and 700 do not: the input was an interval such as "Christiansborg Slot
+	// 1-5", and the service answers with the first house number in the interval,
+	// or the last when the first does not exist.
+	avVaskExact           = 1000
+	avVaskSpellingVariant = 900
+
+	// avVaskNoStreetInPost means the postnummer parsed but no street in that
+	// district matched — the one failure a respelled street could fix.
+	avVaskNoStreetInPost = -800
 )
+
+// avStatusAccepted is the set of DAR lifecycle statuses that denote an address
+// worth returning. DAR exposes exactly four statuses for an Adresse — 2, 3, 4
+// and 5 — so this doubles as a rejection of 4 and 5.
+//
+//   - 2 foreløbig: provisional but real, used for buildings under construction.
+//     A user may legitimately look one up.
+//   - 3 gældende: current.
+//   - 4 nedlagt: was current, since decommissioned. Does not exist on the
+//     ground, and /adresser/{id} answers 404 for it.
+//   - 5 henlagt: was foreløbig and abandoned before ever becoming current, so
+//     it never existed on the ground at all.
+//
+// Returning a 4 or a 5 would attribute nearby sales to a property that is not
+// there — the same substitution this package avoids elsewhere.
+var avStatusAccepted = map[string]string{
+	"2": "foreløbig",
+	"3": "gældende",
+}
+
+// avStatusNames labels the statuses that are rejected, for error messages.
+var avStatusNames = map[string]string{
+	"4": "nedlagt (no longer exists)",
+	"5": "henlagt (abandoned before it was ever in use)",
+}
+
+// avCheckStatus returns an error if a DAR lifecycle status must not be
+// returned to the caller. betegnelse is used only to describe the address.
+func avCheckStatus(status flexStr, betegnelse string) error {
+	s := string(status)
+	if _, ok := avStatusAccepted[s]; ok {
+		return nil
+	}
+	name, ok := avStatusNames[s]
+	if !ok {
+		name = fmt.Sprintf("status %q, which is not a usable address", s)
+	}
+	return fmt.Errorf("address %q is %s", betegnelse, name)
+}
 
 func avBaseURL() string {
 	if u := os.Getenv("ADRESSEVAELGER_URL"); u != "" {
@@ -102,7 +176,32 @@ type avAddress struct {
 	Adressebetegnelse string      `json:"adressebetegnelse"`
 	Etagebetegnelse   *string     `json:"etagebetegnelse"`
 	Doerbetegnelse    *string     `json:"doerbetegnelse"`
+	Status            flexStr     `json:"status"`
 	Husnummer         avHusnummer `json:"husnummer"`
+}
+
+// avVaskResponse is the /vask/ (Adressevask) payload. Adressevask resolves a
+// full address string — including historical designations — to a single current
+// address, or to nothing. It is strictly a fallback, not a replacement for
+// /adresser/soeg: it requires a postnummer (kode -300 without one) and returns
+// no result at all when the input is ambiguous.
+//
+// Status is a JSON number here but a string on /adresser/{id}, hence flexStr.
+type avVaskResponse struct {
+	Vaskestatus struct {
+		Kode  int    `json:"kode"`
+		Tekst string `json:"tekst"`
+	} `json:"vaskestatus"`
+
+	Vaskeresultat struct {
+		AdresseIDLokalID  string  `json:"adresse_id_lokalid"`
+		Adressebetegnelse string  `json:"adressebetegnelse"`
+		Status            flexStr `json:"status"`
+	} `json:"vaskeresultat"`
+
+	VaskeresultatHistorisk struct {
+		Adressebetegnelse *string `json:"adressebetegnelse"`
+	} `json:"vaskeresultat_historisk"`
 }
 
 // avAddressResponse is the /adresser/{id} payload.
@@ -187,40 +286,244 @@ func (a AVFuzzySearch) MaxAge() time.Duration {
 	return 365 * 24 * time.Hour
 }
 
-// Fetch resolves the free-text query to a single address. Phonetic search always
-// returns a ranked list, so the top candidate ("bedste match") is taken; the
-// remainder are near-miss variants such as floor/door permutations of the same
-// building.
-func (a AVFuzzySearch) Fetch() ([]*Address, error) {
-	log.Printf("Searching Adressevælger for %q", a.Query)
-
+// avSoegID runs a phonetic search and returns the id of the top-ranked
+// candidate, or "" if there were none. Phonetic search always returns a ranked
+// list, so the top candidate ("bedste match") is taken; the remainder are
+// near-miss variants such as floor/door permutations of the same building.
+func avSoegID(query string) (id, titel string, err error) {
 	var search avSearchResponse
 	if err := avGet("/adresser/soeg", url.Values{
-		"tekst":    {a.Query},
+		"tekst":    {query},
 		"maksimum": {strconv.Itoa(avMaxResults)},
 	}, &search); err != nil {
-		return nil, err
+		return "", "", err
 	}
 
 	if search.Status != "ok" {
-		return nil, fmt.Errorf("Adressevælger search failed: %s %s", search.Status, search.Beskrivelse)
+		return "", "", fmt.Errorf("Adressevælger search failed: %s %s", search.Status, search.Beskrivelse)
 	}
 
 	if len(search.Fund) == 0 {
+		return "", "", nil
+	}
+
+	return search.Fund[0].ID, search.Fund[0].Titel, nil
+}
+
+// avTranslitRules maps ASCII stand-ins to the Danish letters they represent.
+// Digraphs come first so "oe" is preferred over bare "o" at the same position.
+//
+// "aa" -> "å" is deliberately absent: the search already understands it as a
+// genuine Danish orthographic variant ("Aabenraa" resolves to "Åbenrå"), so
+// including it would only widen the search space.
+var avTranslitRules = []struct{ from, to string }{
+	{"oe", "ø"},
+	{"ae", "æ"},
+	{"o", "ø"},
+	{"a", "å"},
+}
+
+// avStreetVariants returns plausible re-spellings of a query typed without
+// Danish characters, most-conservative first, capped at avMaxVariants.
+//
+// Only the street name is varied — everything from the first digit onwards is
+// left untouched. The postnummer disambiguates the town on its own, so
+// "Nørrebrogade 155, 2200 Kobenhavn N" already resolves while
+// "Norrebrogade 155, 2200 København N" does not. Restricting substitution to the
+// street keeps the combinatorial space small enough to brute-force.
+//
+// The original query is not included; the caller has already tried it.
+func avStreetVariants(query string) []string {
+	street, rest := avSplitStreet(query)
+	if street == "" {
+		return nil
+	}
+
+	var out []string
+	seen := map[string]bool{strings.ToLower(street): true}
+
+	// Breadth-first over substitutions: apply one rule to an already-generated
+	// candidate and queue the result. This naturally orders single
+	// substitutions before combinations, which is the likelier fix.
+	queue := []string{street}
+	for len(queue) > 0 && len(out) < avMaxVariants {
+		cur := queue[0]
+		queue = queue[1:]
+
+		for _, rule := range avTranslitRules {
+			for i := 0; i+len(rule.from) <= len(cur); i++ {
+				if !strings.EqualFold(cur[i:i+len(rule.from)], rule.from) {
+					continue
+				}
+
+				// Preserve the case of the text being replaced, so
+				// "Osterbrogade" becomes "Østerbrogade" and not
+				// "østerbrogade".
+				to := rule.to
+				if isUpperASCII(cur[i]) {
+					to = strings.ToUpper(to)
+				}
+
+				cand := cur[:i] + to + cur[i+len(rule.from):]
+				if seen[strings.ToLower(cand)] {
+					continue
+				}
+				seen[strings.ToLower(cand)] = true
+
+				out = append(out, cand+rest)
+				queue = append(queue, cand)
+
+				if len(out) >= avMaxVariants {
+					return out
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+func isUpperASCII(b byte) bool { return b >= 'A' && b <= 'Z' }
+
+// avSplitStreet splits a query into its street-name prefix and the remainder,
+// cutting at the first digit — the house number. A query with no digit is all
+// street name.
+func avSplitStreet(query string) (street, rest string) {
+	for i, r := range query {
+		if r >= '0' && r <= '9' {
+			return query[:i], query[i:]
+		}
+	}
+	return query, ""
+}
+
+// avVask resolves a full address string through Adressevask, which is the only
+// Adressevælger endpoint that knows historical designations. It returns "" and
+// the vaskestatus code when there is no usable match, so the caller can tell
+// which failures are worth retrying.
+//
+// A dead address is rejected here rather than downstream: /adresser/{id}
+// answers 404 for a nedlagt address, so continuing would turn a meaningful
+// "this address no longer exists" into an opaque lookup failure.
+func avVask(query string) (string, int, error) {
+	var vask avVaskResponse
+	if err := avGet("/vask/", url.Values{"adresse": {query}}, &vask); err != nil {
+		return "", 0, err
+	}
+
+	kode := vask.Vaskestatus.Kode
+	id := vask.Vaskeresultat.AdresseIDLokalID
+	if id == "" {
+		// Ambiguous input also lands here: the service returns a null result
+		// rather than a list when several addresses match.
+		log.Printf("Adressevask found no match for %q (kode %d: %s)",
+			query, kode, vask.Vaskestatus.Tekst)
+		return "", kode, nil
+	}
+
+	// Only the two codes that identify one specific house number are accepted.
+	// This is an allowlist rather than a rejection of the known interval codes:
+	// an unrecognised match code means the service resolved the input by some
+	// rule this code has never seen, and guessing that the rule preserves the
+	// requested property is exactly the substitution being guarded against.
+	if kode != avVaskExact && kode != avVaskSpellingVariant {
+		return "", kode, fmt.Errorf(
+			"Adressevask did not resolve %q to one specific address: it answered %q (kode %d: %s)",
+			query, vask.Vaskeresultat.Adressebetegnelse, kode, vask.Vaskestatus.Tekst)
+	}
+
+	if err := avCheckStatus(vask.Vaskeresultat.Status, vask.Vaskeresultat.Adressebetegnelse); err != nil {
+		return "", kode, err
+	}
+
+	if h := vask.VaskeresultatHistorisk.Adressebetegnelse; h != nil && *h != "" {
+		log.Printf("Adressevask resolved historical %q -> %q", *h, vask.Vaskeresultat.Adressebetegnelse)
+	}
+
+	return id, kode, nil
+}
+
+// avResolveID turns free text into a single address id, widening the search only
+// as far as needed. Returns "" when nothing matched, which api.go renders as
+// "no found address".
+func avResolveID(query string) (string, error) {
+	id, titel, err := avSoegID(query)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		log.Printf("Adressevælger matched %q -> %q (%s)", query, titel, id)
+		return id, nil
+	}
+
+	variants := avStreetVariants(query)
+	for _, variant := range variants {
+		id, titel, err := avSoegID(variant)
+		if err != nil {
+			return "", err
+		}
+		if id != "" {
+			log.Printf("Adressevælger matched %q via re-spelling %q -> %q (%s)", query, variant, titel, id)
+			return id, nil
+		}
+	}
+
+	id, kode, err := avVask(query)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		log.Printf("Adressevask matched %q -> %s", query, id)
+		return id, nil
+	}
+
+	// Adressevask has spelling tolerance of its own, but it is not the same as
+	// the search's: it resolves "Hojgaardsvej" and not "Norrebrogade". So an
+	// address that is both historical and typed in ASCII can miss every step so
+	// far. Retry the same variants here, but only for the one failure a
+	// respelled street could plausibly fix — the others (postnummer missing,
+	// unknown or unparseable, house number not found) are not about the street,
+	// and retrying them would just multiply requests on a hopeless query.
+	if kode == avVaskNoStreetInPost {
+		for _, variant := range variants {
+			id, _, err := avVask(variant)
+			if err != nil {
+				return "", err
+			}
+			if id != "" {
+				log.Printf("Adressevask matched %q via re-spelling %q -> %s", query, variant, id)
+				return id, nil
+			}
+		}
+	}
+
+	log.Printf("Adressevælger found no addresses for %q", query)
+	return "", nil
+}
+
+// Fetch resolves the free-text query to a single address.
+func (a AVFuzzySearch) Fetch() ([]*Address, error) {
+	log.Printf("Searching Adressevælger for %q", a.Query)
+
+	id, err := avResolveID(a.Query)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
 		// Not an error: api.go turns an empty result into "no found address".
-		log.Printf("Adressevælger found no addresses for %q", a.Query)
 		return nil, nil
 	}
 
-	best := search.Fund[0]
-	log.Printf("Adressevælger matched %q -> %q (%s)", a.Query, best.Titel, best.ID)
-
 	var lookup avAddressResponse
-	if err := avGet("/adresser/"+best.ID, nil, &lookup); err != nil {
+	if err := avGet("/adresser/"+id, nil, &lookup); err != nil {
 		return nil, err
 	}
 	if lookup.Status != "ok" {
-		return nil, fmt.Errorf("Adressevælger lookup failed for %s: %s", best.ID, lookup.Status)
+		return nil, fmt.Errorf("Adressevælger lookup failed for %s: %s", id, lookup.Status)
+	}
+
+	if err := avCheckStatus(lookup.Adresse.Status, lookup.Adresse.Adressebetegnelse); err != nil {
+		return nil, err
 	}
 
 	addr, err := avToAddress(lookup.Adresse)
