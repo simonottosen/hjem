@@ -35,6 +35,10 @@ import (
 //   - Historical designations ("Vestergade 1" after renumbering to "1A").
 //     Retried against /vask/ (Adressevask), which is the only endpoint that
 //     knows superseded betegnelser — see avVask.
+//
+// The two overlap, so the respelled variants are tried against /vask/ as well.
+// Whatever the step, the resolved address is only returned if its DAR lifecycle
+// status says it exists — see avStatusAccepted.
 const (
 	avDefaultBaseURL = "https://adressevaelger.dk"
 
@@ -60,15 +64,60 @@ const (
 	// Streets needing more than a handful of substitutions are vanishingly rare.
 	avMaxVariants = 8
 
-	// avStatusNedlagt is the DAR lifecycle status for a decommissioned
-	// ("nedlagt") address. Such an address must not be returned: it no longer
-	// exists on the ground, and /adresser/{id} answers 404 for it anyway.
+	// Adressevask vaskestatus codes. Positive is a match, negative a failure;
+	// the two differ in kind, so only the ones acted on are named here.
 	//
-	// Only nedlagt is rejected. Other non-current statuses — notably foreløbig,
-	// used for buildings under construction — are real addresses a user may
-	// legitimately look up, so they are left alone.
-	avStatusNedlagt = "4"
+	// 1000 and 900 are the only codes that identify one specific house number
+	// (900 merely allowed a spelling variation in the street name). Notably 800
+	// and 700 do not: the input was an interval such as "Christiansborg Slot
+	// 1-5", and the service answers with the first house number in the interval,
+	// or the last when the first does not exist.
+	avVaskExact           = 1000
+	avVaskSpellingVariant = 900
+
+	// avVaskNoStreetInPost means the postnummer parsed but no street in that
+	// district matched — the one failure a respelled street could fix.
+	avVaskNoStreetInPost = -800
 )
+
+// avStatusAccepted is the set of DAR lifecycle statuses that denote an address
+// worth returning. DAR exposes exactly four statuses for an Adresse — 2, 3, 4
+// and 5 — so this doubles as a rejection of 4 and 5.
+//
+//   - 2 foreløbig: provisional but real, used for buildings under construction.
+//     A user may legitimately look one up.
+//   - 3 gældende: current.
+//   - 4 nedlagt: was current, since decommissioned. Does not exist on the
+//     ground, and /adresser/{id} answers 404 for it.
+//   - 5 henlagt: was foreløbig and abandoned before ever becoming current, so
+//     it never existed on the ground at all.
+//
+// Returning a 4 or a 5 would attribute nearby sales to a property that is not
+// there — the same substitution this package avoids elsewhere.
+var avStatusAccepted = map[string]string{
+	"2": "foreløbig",
+	"3": "gældende",
+}
+
+// avStatusNames labels the statuses that are rejected, for error messages.
+var avStatusNames = map[string]string{
+	"4": "nedlagt (no longer exists)",
+	"5": "henlagt (abandoned before it was ever in use)",
+}
+
+// avCheckStatus returns an error if a DAR lifecycle status must not be
+// returned to the caller. betegnelse is used only to describe the address.
+func avCheckStatus(status flexStr, betegnelse string) error {
+	s := string(status)
+	if _, ok := avStatusAccepted[s]; ok {
+		return nil
+	}
+	name, ok := avStatusNames[s]
+	if !ok {
+		name = fmt.Sprintf("status %q, which is not a usable address", s)
+	}
+	return fmt.Errorf("address %q is %s", betegnelse, name)
+}
 
 func avBaseURL() string {
 	if u := os.Getenv("ADRESSEVAELGER_URL"); u != "" {
@@ -349,37 +398,49 @@ func avSplitStreet(query string) (street, rest string) {
 }
 
 // avVask resolves a full address string through Adressevask, which is the only
-// Adressevælger endpoint that knows historical designations. Returns "" when
-// there is no match.
+// Adressevælger endpoint that knows historical designations. It returns "" and
+// the vaskestatus code when there is no usable match, so the caller can tell
+// which failures are worth retrying.
 //
-// A nedlagt result is rejected here rather than downstream: /adresser/{id}
-// answers 404 for a decommissioned address, so continuing would turn a
-// meaningful "this address no longer exists" into an opaque lookup failure.
-func avVask(query string) (string, error) {
+// A dead address is rejected here rather than downstream: /adresser/{id}
+// answers 404 for a nedlagt address, so continuing would turn a meaningful
+// "this address no longer exists" into an opaque lookup failure.
+func avVask(query string) (string, int, error) {
 	var vask avVaskResponse
 	if err := avGet("/vask/", url.Values{"adresse": {query}}, &vask); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
+	kode := vask.Vaskestatus.Kode
 	id := vask.Vaskeresultat.AdresseIDLokalID
 	if id == "" {
-		// Codes are informative: -300 missing postnummer, -700 no such house
-		// number, -800 street not in that postal district, -1000 unparseable.
+		// Ambiguous input also lands here: the service returns a null result
+		// rather than a list when several addresses match.
 		log.Printf("Adressevask found no match for %q (kode %d: %s)",
-			query, vask.Vaskestatus.Kode, vask.Vaskestatus.Tekst)
-		return "", nil
+			query, kode, vask.Vaskestatus.Tekst)
+		return "", kode, nil
 	}
 
-	if string(vask.Vaskeresultat.Status) == avStatusNedlagt {
-		return "", fmt.Errorf("address %q is nedlagt (no longer exists): %s",
-			query, vask.Vaskeresultat.Adressebetegnelse)
+	// Only the two codes that identify one specific house number are accepted.
+	// This is an allowlist rather than a rejection of the known interval codes:
+	// an unrecognised match code means the service resolved the input by some
+	// rule this code has never seen, and guessing that the rule preserves the
+	// requested property is exactly the substitution being guarded against.
+	if kode != avVaskExact && kode != avVaskSpellingVariant {
+		return "", kode, fmt.Errorf(
+			"Adressevask did not resolve %q to one specific address: it answered %q (kode %d: %s)",
+			query, vask.Vaskeresultat.Adressebetegnelse, kode, vask.Vaskestatus.Tekst)
+	}
+
+	if err := avCheckStatus(vask.Vaskeresultat.Status, vask.Vaskeresultat.Adressebetegnelse); err != nil {
+		return "", kode, err
 	}
 
 	if h := vask.VaskeresultatHistorisk.Adressebetegnelse; h != nil && *h != "" {
 		log.Printf("Adressevask resolved historical %q -> %q", *h, vask.Vaskeresultat.Adressebetegnelse)
 	}
 
-	return id, nil
+	return id, kode, nil
 }
 
 // avResolveID turns free text into a single address id, widening the search only
@@ -395,7 +456,8 @@ func avResolveID(query string) (string, error) {
 		return id, nil
 	}
 
-	for _, variant := range avStreetVariants(query) {
+	variants := avStreetVariants(query)
+	for _, variant := range variants {
 		id, titel, err := avSoegID(variant)
 		if err != nil {
 			return "", err
@@ -406,13 +468,33 @@ func avResolveID(query string) (string, error) {
 		}
 	}
 
-	id, err = avVask(query)
+	id, kode, err := avVask(query)
 	if err != nil {
 		return "", err
 	}
 	if id != "" {
 		log.Printf("Adressevask matched %q -> %s", query, id)
 		return id, nil
+	}
+
+	// Adressevask has spelling tolerance of its own, but it is not the same as
+	// the search's: it resolves "Hojgaardsvej" and not "Norrebrogade". So an
+	// address that is both historical and typed in ASCII can miss every step so
+	// far. Retry the same variants here, but only for the one failure a
+	// respelled street could plausibly fix — the others (postnummer missing,
+	// unknown or unparseable, house number not found) are not about the street,
+	// and retrying them would just multiply requests on a hopeless query.
+	if kode == avVaskNoStreetInPost {
+		for _, variant := range variants {
+			id, _, err := avVask(variant)
+			if err != nil {
+				return "", err
+			}
+			if id != "" {
+				log.Printf("Adressevask matched %q via re-spelling %q -> %s", query, variant, id)
+				return id, nil
+			}
+		}
 	}
 
 	log.Printf("Adressevælger found no addresses for %q", query)
@@ -440,8 +522,8 @@ func (a AVFuzzySearch) Fetch() ([]*Address, error) {
 		return nil, fmt.Errorf("Adressevælger lookup failed for %s: %s", id, lookup.Status)
 	}
 
-	if string(lookup.Adresse.Status) == avStatusNedlagt {
-		return nil, fmt.Errorf("address %q is nedlagt (no longer exists)", lookup.Adresse.Adressebetegnelse)
+	if err := avCheckStatus(lookup.Adresse.Status, lookup.Adresse.Adressebetegnelse); err != nil {
+		return nil, err
 	}
 
 	addr, err := avToAddress(lookup.Adresse)

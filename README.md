@@ -300,13 +300,25 @@ steps in order and stopping at the first hit:
 3. **Adressevask** (`/vask/`) — the only endpoint that knows superseded address
    designations, so it resolves historical input such as a street number that has
    since been renumbered. It requires a full address including postal code.
+   Adressevask has spelling tolerance of its own, but not the same as the search's
+   (it resolves `Hojgaardsvej` and not `Norrebrogade`), so an address that is both
+   historical *and* ASCII-spelled needs the step-2 variants here too. Those are
+   only retried on vaskestatus `-800`, the one failure code that means the street
+   name was the part that did not match.
 
-The resolved address is rejected if its DAR lifecycle status is *nedlagt*
-(decommissioned) — the address no longer exists, so silently returning its
-replacement would attribute sales to the wrong property. Other non-current statuses
-are accepted; *foreløbig* in particular is a real address for a building under
-construction. A query that survives all three steps without a hit is reported as
-not found.
+Two classes of result are refused rather than returned, because both would value a
+different property than the one asked about:
+
+- **A dead address.** DAR exposes four lifecycle statuses for an address; only
+  *gældende* (3) and *foreløbig* (2, a real address for a building under
+  construction) are accepted. *Nedlagt* (4, since removed) and *henlagt* (5,
+  provisional and abandoned before ever being used) are not.
+- **An interval match.** Given a range like `Christiansborg Slot 1-5`, Adressevask
+  answers with a single house number from one end of the range (vaskestatus `800`
+  or `700`). Only the codes that identify one specific house number — `1000` and
+  `900` — are accepted.
+
+A query that survives every step without a hit is reported as not found.
 
 ### What Boliga data includes
 
