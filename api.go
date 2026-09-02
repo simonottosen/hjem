@@ -165,10 +165,9 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 		return
 	}
 
-	// Attach warnings to the response so the frontend can display them
-	if len(fetchWarnings) > 0 {
-		luResp.Warnings = fetchWarnings
-	}
+	// Attach warnings to the response so the frontend can display them.
+	// Appended, not assigned: FormatLookupResponse adds its own.
+	luResp.Warnings = append(luResp.Warnings, fetchWarnings...)
 
 	// Final cancellation check before setting result — don't overwrite a newer lookup
 	if cancelled() {
@@ -461,26 +460,38 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 
 	var i int
 	for j, s := range sales {
-		if len(s) > 0 {
-			a := addrs[j]
-			m[a.DawaID] = i
-			resp.Addrs = append(resp.Addrs, a)
-
-			tempsales := make([]*JSONSale, len(s))
-			for k, sale := range s {
-				tempsales[k] = &JSONSale{
-					AddrIndex: i,
-					Amount:    sale.AmountDKK,
-					SqMeters:  sale.SqMeters,
-					Rooms:     sale.Rooms,
-					BuildYear: sale.BuildYear,
-					When:      sale.Date,
-				}
-			}
-			resp.Sales = append(resp.Sales, tempsales...)
-
-			i += 1
+		// Addresses with no sales carry no information and are dropped, which
+		// is why the output index i runs independently of j. The searched
+		// address is the exception: it is what primary_idx refers to, and a
+		// home that simply has never been sold must not lose its place in the
+		// response — dropping it would silently shift primary_idx onto a
+		// neighbour's flat, and with it the comps estimate, the subject
+		// property shown, and the sqm projections.
+		if j != 0 && len(s) == 0 {
+			continue
 		}
+
+		a := addrs[j]
+		if j == 0 {
+			resp.PrimaryIndex = i
+		}
+		m[a.DawaID] = i
+		resp.Addrs = append(resp.Addrs, a)
+
+		tempsales := make([]*JSONSale, len(s))
+		for k, sale := range s {
+			tempsales[k] = &JSONSale{
+				AddrIndex: i,
+				Amount:    sale.AmountDKK,
+				SqMeters:  sale.SqMeters,
+				Rooms:     sale.Rooms,
+				BuildYear: sale.BuildYear,
+				When:      sale.Date,
+			}
+		}
+		resp.Sales = append(resp.Sales, tempsales...)
+
+		i += 1
 	}
 
 	r := map[int][]int{}
@@ -513,9 +524,13 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 	}
 
 	var projections []map[time.Time]int
+	// addrs and sales are the caller's parallel slices, in which the searched
+	// address is index 0. resp.PrimaryIndex indexes resp.Addrs instead, so it
+	// must not be used here — the two index spaces differ as soon as any
+	// address is dropped.
 	primaryBuildingSize := addrs[0].BoligaBuildingSize
 	if primaryBuildingSize > 0 {
-		for _, s := range sales[resp.PrimaryIndex] {
+		for _, s := range sales[0] {
 			m := map[time.Time]int{}
 			sqMeterPrice := float64(s.AmountDKK) / float64(primaryBuildingSize)
 			yearInt, _, _ := s.Date.Date()
@@ -544,9 +559,29 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 	}
 	resp.SquareMeters.Projections = projections
 
-	// Comparable sales estimate
+	// Comparable sales estimate, weighted by similarity to the subject
+	// property — so it has to be the searched home, not merely the first one
+	// that happens to have sales.
 	if len(resp.Addrs) > 0 {
-		resp.CompsEstimate = ComputeCompsEstimate(resp.Addrs[0], resp.Addrs, resp.Sales, global)
+		resp.CompsEstimate = ComputeCompsEstimate(resp.Addrs[resp.PrimaryIndex], resp.Addrs, resp.Sales, global)
+	}
+
+	// Every home-specific figure — the comps estimate and the sqm projections
+	// — is scaled by the subject property's size, and a size only ever reaches
+	// us from a matched Boliga sale that carried square metres
+	// (boliga.go:130). Without one the home cannot be valued at all. Say so:
+	// the alternative is a dashboard that silently omits the number the user
+	// came for. Previously this case was hidden, because the estimate was
+	// computed against whichever sold neighbour fell at index 0.
+	//
+	// Report the gap, not a cause. Never having been sold is the usual
+	// reason, but a failed street request, an address that matched no sale,
+	// a home sold only within a family (boliga.go:313 keeps "Alm. Salg" only)
+	// or a sale record with no square metres all land here too, and we cannot
+	// tell them apart from this side.
+	if addrs[0].BoligaBuildingSize == 0 {
+		resp.Warnings = append(resp.Warnings,
+			"Boliga har ikke oplyst en brugbar størrelse for denne bolig — ofte fordi den ikke har været solgt — så der kan ikke beregnes en værdi for netop denne bolig. Områdets kvadratmeterpriser vises stadig.")
 	}
 
 	return &resp, nil
