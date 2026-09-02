@@ -28,15 +28,22 @@ type ProgressEvent struct {
 }
 
 type Progress struct {
-	mu        sync.Mutex
-	stage     ProgressStage
-	message   string
-	current   int
-	total     int
-	startedAt time.Time
-	result    interface{}
-	warnings  []string
-	notify    chan struct{}
+	mu         sync.Mutex
+	stage      ProgressStage
+	message    string
+	current    int
+	total      int
+	startedAt  time.Time
+	finishedAt time.Time
+	result     interface{}
+	warnings   []string
+	notify     chan struct{}
+
+	// now exists so the session store can hold this progress to the same clock
+	// it evicts by. The two are compared against each other — a finished
+	// lookup is kept for a while after it finished — and mixing a frozen test
+	// clock with the wall clock makes that comparison meaningless.
+	now func() time.Time
 }
 
 func NewProgress() *Progress {
@@ -46,6 +53,7 @@ func NewProgress() *Progress {
 		// elapsed time relative to it and a zero value would read as decades.
 		startedAt: time.Now(),
 		notify:    make(chan struct{}, 1),
+		now:       time.Now,
 	}
 }
 
@@ -58,6 +66,11 @@ func (p *Progress) Update(stage ProgressStage, message string, current, total in
 	p.message = message
 	p.current = current
 	p.total = total
+	// First terminal stage wins. A lookup that errors after reporting done, or
+	// vice versa, should not have its retention clock pushed forward.
+	if p.finishedAt.IsZero() && (stage == StageDone || stage == StageError) {
+		p.finishedAt = p.now()
+	}
 	p.mu.Unlock()
 
 	select {
@@ -85,9 +98,22 @@ func (p *Progress) SetResult(result interface{}) {
 // session store uses it to tell sessions that still hold a running goroutine
 // from ones that only hold a result.
 func (p *Progress) Finished() bool {
+	_, ok := p.FinishedAt()
+	return ok
+}
+
+// FinishedAt reports when this lookup reached a terminal stage. The session
+// store retains a finished lookup for a while afterwards, and it has to
+// measure that from here: measuring from when the lookup *started* would throw
+// away precisely the slow results, since a lookup that ran longer than the
+// retention window is already expired the moment it completes.
+func (p *Progress) FinishedAt() (time.Time, bool) {
+	if p == nil {
+		return time.Time{}, false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.stage == StageDone || p.stage == StageError
+	return p.finishedAt, !p.finishedAt.IsZero()
 }
 
 func (p *Progress) Snapshot() ProgressEvent {

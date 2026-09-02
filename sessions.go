@@ -94,9 +94,14 @@ func (st *sessionStore) Create(previousID string) (*lookupSession, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p := NewProgress()
+	// Same clock as the store, so that "finished 15 minutes ago" means the
+	// same thing on both sides of the eviction check. Assigned before the
+	// lookup goroutine exists, so nothing races on it.
+	p.now = st.now
 	sess := &lookupSession{
 		ID:        newSessionID(),
-		Progress:  NewProgress(),
+		Progress:  p,
 		ctx:       ctx,
 		cancel:    cancel,
 		createdAt: st.now(),
@@ -126,13 +131,16 @@ func (st *sessionStore) Get(id string) (*lookupSession, bool) {
 func (st *sessionStore) evictLocked() {
 	now := st.now()
 	for id, sess := range st.sessions {
-		age := now.Sub(sess.createdAt)
-		switch {
-		case sess.Progress.Finished():
-			if age >= st.finishedTTL {
+		// The two branches deliberately measure from different instants: a
+		// finished lookup is retained from when it finished, an in-flight one
+		// is cancelled on how long it has been running. Measuring both from
+		// createdAt would evict a slow lookup's result the moment it arrived.
+		switch finishedAt, finished := sess.Progress.FinishedAt(); {
+		case finished:
+			if now.Sub(finishedAt) >= st.finishedTTL {
 				delete(st.sessions, id)
 			}
-		case age >= st.maxDuration:
+		case now.Sub(sess.createdAt) >= st.maxDuration:
 			log.Printf("Lookup session %s exceeded %s; cancelling", id, st.maxDuration)
 			sess.cancel()
 			delete(st.sessions, id)

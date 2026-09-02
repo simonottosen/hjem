@@ -94,6 +94,40 @@ func TestSessionStoreEvictsFinishedAfterTTL(t *testing.T) {
 	}
 }
 
+// A lookup is allowed to run for up to maxLookupDuration, which is longer
+// than a finished result is retained. Its result must still survive being
+// collected: retaining from createdAt made a lookup that ran longer than
+// finishedTTL expire the instant it completed, so the poll that would have
+// delivered the result evicted it and answered 404 instead — and the slower
+// the lookup, the more certainly its work was thrown away.
+func TestSessionStoreRetainsResultOfLongRunningLookup(t *testing.T) {
+	st, clock := newTestStore()
+
+	sess, _ := st.Create("")
+
+	// Runs for longer than a finished result is kept, but well inside what an
+	// in-flight lookup is allowed.
+	*clock = clock.Add(st.finishedTTL + time.Minute)
+	if _, ok := st.Get(sess.ID); !ok {
+		t.Fatal("a lookup still running inside maxLookupDuration was evicted")
+	}
+	sess.Progress.Update(StageDone, "Færdig!", 0, 0)
+
+	if _, ok := st.Get(sess.ID); !ok {
+		t.Fatal("the result was evicted by the very poll that came to collect it")
+	}
+
+	// And it is then kept for the full window, measured from completion.
+	*clock = clock.Add(st.finishedTTL - time.Second)
+	if _, ok := st.Get(sess.ID); !ok {
+		t.Fatal("result evicted before its TTL had run from the time it finished")
+	}
+	*clock = clock.Add(2 * time.Second)
+	if _, ok := st.Get(sess.ID); ok {
+		t.Fatal("finished session outlived its TTL")
+	}
+}
+
 func TestSessionStoreDoesNotEvictRunningLookups(t *testing.T) {
 	st, clock := newTestStore()
 
