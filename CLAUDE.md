@@ -57,8 +57,8 @@ docker run -p 8080:8080 hjem
 - `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration
 - `boliga.go` — Boliga.dk scraper with DB caching
 - `adressevaelger.go` — Adressevælgeren: free-text address search (phonetic → ASCII re-spelling → `/vask/` for historical designations; dead addresses and interval matches are rejected rather than substituted), plus batch enrichment of DAR results with street/postal/municipality
-- `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection
-- `dawa.go` — legacy DAWA client. Only `DawaNearbySearch` remains, used solely by `cmd/compare-radius`
+- `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection. DAR caps a page at 1000 nodes and rejects a larger `first`, so all three queries are cursor-paginated via `darPostAll`; reading one page silently under-samples dense areas
+- `dawa.go` — legacy DAWA client, plus `dawaCacher` (the URL-keyed, 365-day address query cache shared by `AVFuzzySearch` and `DARNearbySearch`; failed *and* empty results are deliberately not cached). Only `DawaNearbySearch` remains, used solely by `cmd/compare-radius`
 - `dingeo.go` — Dingeo + FlareSolverr valuation scraper
 - `comps.go` — Gaussian-weighted comparable sales estimation
 - `math.go` — IQR outlier filtering, year-over-year stats

@@ -171,9 +171,18 @@ const darStatusCurrent = "3"
 //  3. darQueryAdresser — DAR_Adresse whose `husnummer` id is `in` that set →
 //     the full unit addresses (matching DAWA /adresser).
 //
-// darMaxNodes caps each page; 100 m searches stay well under this, but a result
-// of exactly this length signals possible truncation (logged as a warning).
+// darMaxNodes is the largest page DAR will serve: `first: 1001` is rejected
+// outright with "Invalid pagination input was supplied". It is a server limit,
+// not a tuning knob, so a result set larger than this can only be read by
+// following the cursor — see darPostAll. A 500 m search in central Copenhagen
+// exceeds it comfortably.
 const darMaxNodes = 1000
+
+// darMaxPages bounds the cursor walk so a malformed cursor or a server that
+// always reports hasNextPage cannot spin forever against a rate-limited API.
+// At darMaxNodes per page this allows 200k nodes per query, far beyond any
+// plausible radius search; exceeding it is a bug, so it is reported as one.
+const darMaxPages = 200
 
 // darInLimit is DAR's maximum number of elements allowed in a `where … in […]`
 // filter. Larger id sets are queried in batches of this size.
@@ -192,22 +201,29 @@ const darInLimit = 100
 // than passed as a GraphQL variable: the geometry input is a custom scalar, and
 // a String variable fed into it is silently coerced to null (matching nothing),
 // whereas an inline literal is parsed correctly. This is the only geometric query.
-const darQueryPoints = `query Points {
-  DAR_Adressepunkt(first: %d, registreringstid: "%s", virkningstid: "%s", where: { position: { within: { crs: 25832, wkt: "%s" } } }) {
+//
+// $after carries the cursor for pages after the first; it is passed as a
+// GraphQL variable rather than inlined so the opaque base64 cursor needs no
+// escaping. `after: null` is valid and means "start from the beginning".
+const darQueryPoints = `query Points($after: String) {
+  DAR_Adressepunkt(first: %d, after: $after, registreringstid: "%s", virkningstid: "%s", where: { position: { within: { crs: 25832, wkt: "%s" } } }) {
+    pageInfo { hasNextPage endCursor }
     nodes { id_lokalId position { wkt } }
   }
 }`
 
 // darQueryHusnumre resolves access-point ids to house numbers.
-const darQueryHusnumre = `query Husnumre {
-  DAR_Husnummer(first: %d, registreringstid: "%s", virkningstid: "%s", where: { adgangspunkt: { in: [%s] } }) {
+const darQueryHusnumre = `query Husnumre($after: String) {
+  DAR_Husnummer(first: %d, after: $after, registreringstid: "%s", virkningstid: "%s", where: { adgangspunkt: { in: [%s] } }) {
+    pageInfo { hasNextPage endCursor }
     nodes { id_lokalId adgangspunkt }
   }
 }`
 
 // darQueryAdresser resolves house-number ids to full unit addresses.
-const darQueryAdresser = `query Adresser {
-  DAR_Adresse(first: %d, registreringstid: "%s", virkningstid: "%s", where: { husnummer: { in: [%s] } }) {
+const darQueryAdresser = `query Adresser($after: String) {
+  DAR_Adresse(first: %d, after: $after, registreringstid: "%s", virkningstid: "%s", where: { husnummer: { in: [%s] } }) {
+    pageInfo { hasNextPage endCursor }
     nodes { id_lokalId adressebetegnelse etagebetegnelse doerbetegnelse husnummer status }
   }
 }`
@@ -300,13 +316,12 @@ func (d DARNearbySearch) Fetch() ([]*Address, error) {
 	// Step 1: access points within the polygon. Collect ids regardless of
 	// whether the position parses, so a coordinate-parsing problem doesn't look
 	// like an empty geometry result (the two are logged separately).
-	var points darPointResp
-	if err := darPost(endpoint,
+	raw, err := darPostAll(endpoint,
 		fmt.Sprintf(darQueryPoints, darMaxNodes, now, now, wkt),
-		nil, &points); err != nil {
+		func(r *darPointResp) *darConnection[darPointNode] { return &r.Adressepunkt })
+	if err != nil {
 		return nil, err
 	}
-	raw := points.Adressepunkt.Nodes
 	pointPos := make(map[string][2]float64, len(raw))
 	pointIDs := make([]string, 0, len(raw))
 	for _, n := range raw {
@@ -327,13 +342,13 @@ func (d DARNearbySearch) Fetch() ([]*Address, error) {
 	// DAR caps `in` lists at darInLimit, so the id list is queried in batches.
 	husToPoint := make(map[string]string)
 	for _, batch := range chunk(pointIDs, darInLimit) {
-		var husnumre darHusnummerResp
-		if err := darPost(endpoint,
+		nodes, err := darPostAll(endpoint,
 			fmt.Sprintf(darQueryHusnumre, darMaxNodes, now, now, gqlIDList(batch)),
-			nil, &husnumre); err != nil {
+			func(r *darHusnummerResp) *darConnection[darHusnummerNode] { return &r.Husnummer })
+		if err != nil {
 			return nil, err
 		}
-		for _, n := range husnumre.Husnummer.Nodes {
+		for _, n := range nodes {
 			husToPoint[n.IDLokalID] = n.Adgangspunkt
 		}
 	}
@@ -346,14 +361,14 @@ func (d DARNearbySearch) Fetch() ([]*Address, error) {
 	out := make([]*Address, 0, len(husToPoint))
 	total := 0
 	for _, batch := range chunk(keysOf(husToPoint), darInLimit) {
-		var adresser darAdresseResp
-		if err := darPost(endpoint,
+		nodes, err := darPostAll(endpoint,
 			fmt.Sprintf(darQueryAdresser, darMaxNodes, now, now, gqlIDList(batch)),
-			nil, &adresser); err != nil {
+			func(r *darAdresseResp) *darConnection[darAdresseNode] { return &r.Adresse })
+		if err != nil {
 			return nil, err
 		}
-		for i := range adresser.Adresse.Nodes {
-			n := adresser.Adresse.Nodes[i]
+		for i := range nodes {
+			n := nodes[i]
 			total++
 			if !d.KeepAll && string(n.Status) != darStatusCurrent {
 				continue
@@ -401,6 +416,44 @@ func DARRawQuery(query string, variables map[string]any) (json.RawMessage, error
 		return nil, err
 	}
 	return raw, nil
+}
+
+// darPostAll runs a paginated DAR query to exhaustion and returns every node.
+//
+// DAR caps a page at darMaxNodes and rejects any larger `first`, so a query
+// whose result set exceeds that limit *silently* returns a partial answer
+// unless the cursor is followed. For a radius search a partial answer is worse
+// than an error: it yields plausible-looking but under-sampled comps. pick
+// selects the connection from the decoded response, which is the only part
+// that differs between the three queries.
+func darPostAll[R any, N any](endpoint, query string, pick func(*R) *darConnection[N]) ([]N, error) {
+	var all []N
+	var after *string // nil on the first page → `after: null`
+
+	for page := 1; ; page++ {
+		var resp R
+		if err := darPost(endpoint, query, map[string]any{"after": after}, &resp); err != nil {
+			return nil, err
+		}
+		conn := pick(&resp)
+		all = append(all, conn.Nodes...)
+
+		// An empty cursor with more pages claimed would loop forever on the
+		// same page, so treat it as the end.
+		if !conn.PageInfo.HasNextPage || conn.PageInfo.EndCursor == "" {
+			// Only worth logging when paging actually happened; single-page
+			// queries are the common case and would drown out the signal.
+			if page > 1 {
+				log.Printf("DAR pagination: %d pages, %d nodes total", page, len(all))
+			}
+			return all, nil
+		}
+		if page >= darMaxPages {
+			return nil, fmt.Errorf("DAR pagination exceeded %d pages (%d nodes so far); refusing to continue", darMaxPages, len(all))
+		}
+		cursor := conn.PageInfo.EndCursor
+		after = &cursor
+	}
 }
 
 // darPost sends a GraphQL POST and unmarshals the `data` field into out,
@@ -495,37 +548,47 @@ func truncate(s string, n int) string {
 // NOTE: darPost already strips the GraphQL `data` envelope, so these structs
 // map the *contents* of `data` (the entity → nodes), with no `data` wrapper.
 
+// darConnection is the envelope DAR wraps every result set in: one page of
+// nodes plus the cursor needed to ask for the next.
+type darConnection[N any] struct {
+	PageInfo struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []N `json:"nodes"`
+}
+
+type darPointNode struct {
+	IDLokalID string `json:"id_lokalId"`
+	Position  struct {
+		WKT string `json:"wkt"`
+	} `json:"position"`
+}
+
 type darPointResp struct {
-	Adressepunkt struct {
-		Nodes []struct {
-			IDLokalID string `json:"id_lokalId"`
-			Position  struct {
-				WKT string `json:"wkt"`
-			} `json:"position"`
-		} `json:"nodes"`
-	} `json:"DAR_Adressepunkt"`
+	Adressepunkt darConnection[darPointNode] `json:"DAR_Adressepunkt"`
+}
+
+type darHusnummerNode struct {
+	IDLokalID    string `json:"id_lokalId"`
+	Adgangspunkt string `json:"adgangspunkt"`
 }
 
 type darHusnummerResp struct {
-	Husnummer struct {
-		Nodes []struct {
-			IDLokalID    string `json:"id_lokalId"`
-			Adgangspunkt string `json:"adgangspunkt"`
-		} `json:"nodes"`
-	} `json:"DAR_Husnummer"`
+	Husnummer darConnection[darHusnummerNode] `json:"DAR_Husnummer"`
+}
+
+type darAdresseNode struct {
+	IDLokalID  string  `json:"id_lokalId"`
+	Betegnelse string  `json:"adressebetegnelse"`
+	Etage      *string `json:"etagebetegnelse"`
+	Doer       *string `json:"doerbetegnelse"`
+	Husnummer  string  `json:"husnummer"`
+	Status     flexStr `json:"status"`
 }
 
 type darAdresseResp struct {
-	Adresse struct {
-		Nodes []struct {
-			IDLokalID  string  `json:"id_lokalId"`
-			Betegnelse string  `json:"adressebetegnelse"`
-			Etage      *string `json:"etagebetegnelse"`
-			Doer       *string `json:"doerbetegnelse"`
-			Husnummer  string  `json:"husnummer"`
-			Status     flexStr `json:"status"`
-		} `json:"nodes"`
-	} `json:"DAR_Adresse"`
+	Adresse darConnection[darAdresseNode] `json:"DAR_Adresse"`
 }
 
 // parsePointWKT parses "POINT (725243.12 6176052.34)" → easting, northing.
