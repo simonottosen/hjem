@@ -18,7 +18,7 @@ Built for home buyers who want a data-driven baseline before negotiating — wit
 - **Whole-building sale removal** — automatically discards bulk portfolio transactions where the same total price appears across three or more apartments at the same address on the same date
 - **Year-over-year change** — shown for the most recent sale, estimated value, and DKK/m²
 - **Partial results with warnings** — if some streets fail to fetch, available data is returned alongside a warning rather than aborting
-- **Caching** — Boliga data is cached for 10 days in PostgreSQL or SQLite; address query results are cached for one year
+- **Caching** — Boliga data is cached for 10 days in PostgreSQL or SQLite; address query results are cached for one year. Failed and empty lookups are never cached, so a query that resolves to nothing today is retried rather than pinned as nonexistent
 
 ## Quick Start with Docker
 
@@ -284,6 +284,8 @@ Dingeo aggregates valuations from multiple external models including the Danish 
 Address data previously came from [DAWA](https://dawadocs.dataforsyningen.dk), which is being retired: free-text autocomplete was withdrawn on 17 Aug 2026 and the service shuts down entirely on 1 Oct 2026. Klimadatastyrelsen's [mapping guide](https://confluence.kds.dk/display/DML/Mapning+fra+DAWA+til+Datafordeleren) splits the replacement across two services, which is why both appear above: Datafordeleren's DAR GraphQL only supports exact matching (`eq`/`in`/`startsWith`) and cannot do free-text search, while Adressevælgeren has no radius search.
 
 Coordinates from both services are EPSG:25832 (ETRS89 / UTM zone 32N) easting/northing in metres, not WGS84 degrees; `datafordeler.go` projects them.
+
+DAR serves at most 1000 nodes per page and rejects any larger `first`, so each of the three radius-search queries is walked with `pageInfo.endCursor` until exhausted. This matters for dense areas: a 500 m search in central Copenhagen returns over 2000 access points, so reading only the first page silently under-samples the comps by more than half.
 
 ### Address resolution
 

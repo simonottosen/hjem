@@ -179,6 +179,15 @@ func (c dawaCacher) Do(req DawaRequest) ([]*Address, error) {
 		performRequest = true
 	}
 
+	// Empty entries are no longer written (see below), but deployments carry
+	// ones from before that change — including queries cached as "not found"
+	// before the address fallback chain existed, which would now resolve.
+	// Treating them as misses lets them self-heal instead of sitting out the
+	// remainder of a 365-day TTL.
+	if cache.Query != "" && cache.IDs == "" {
+		performRequest = true
+	}
+
 	if performRequest {
 		if cache.Query != "" {
 			if err := c.db.Delete(&cache).Error; err != nil {
@@ -192,6 +201,17 @@ func (c dawaCacher) Do(req DawaRequest) ([]*Address, error) {
 			// served for the full MaxAge (365 days), turning a transient outage
 			// into a permanent "no results" for that query.
 			return nil, err
+		}
+
+		// Never cache an empty result either. "Not found" is not a durable fact
+		// the way a resolved address is: a newly registered address appears in
+		// the index later, and the resolution chain itself gains fallbacks over
+		// time. Caching nothing for MaxAge (365 days) would pin that answer for
+		// a year, and because the key is the request URL the user cannot force a
+		// retry except by retyping the query differently. Re-resolving a miss
+		// costs a handful of requests; being wrong for a year does not expire.
+		if len(addrs) == 0 {
+			return nil, nil
 		}
 
 		if err := c.safeCreateOrGetAddrs(addrs); err != nil {
