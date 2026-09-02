@@ -159,14 +159,14 @@ func withNeighbours(primary *Address, primarySales []Sale, n int) ([]*Address, [
 	return addrs, sales
 }
 
-// Boliga only reveals a property's size through its own sales, so an unsold
-// home has no known size and cannot be valued. Correcting primary_idx makes
-// that visible for the first time — the estimate used to be computed against a
-// sold neighbour instead — so the response has to explain the gap rather than
-// just leaving the headline number missing.
+// A size only ever reaches us from a matched Boliga sale carrying square
+// metres, so without one the home cannot be valued. Correcting primary_idx
+// makes that visible for the first time — the estimate used to be computed
+// against a sold neighbour instead — so the response has to explain the gap
+// rather than just leaving the headline number missing.
 func TestFormatLookupResponseWarnsWhenPrimarySizeUnknown(t *testing.T) {
 	primary := testAddr("primary", "Flensborggade", "40")
-	primary.BoligaBuildingSize = 0 // never sold, so Boliga never told us
+	primary.BoligaBuildingSize = 0 // Boliga never gave us a usable size
 	addrs, sales := withNeighbours(primary, nil, 4)
 
 	resp, err := FormatLookupResponse(addrs, map[int][]*Address{}, sales, 0)
@@ -179,7 +179,7 @@ func TestFormatLookupResponseWarnsWhenPrimarySizeUnknown(t *testing.T) {
 	}
 	var explained bool
 	for _, w := range resp.Warnings {
-		if strings.Contains(w, "størrelse er ukendt") {
+		if strings.Contains(w, "brugbar størrelse") {
 			explained = true
 		}
 	}
@@ -208,6 +208,37 @@ func TestFormatLookupResponseKeepsSizeWarningAlongsideFetchWarnings(t *testing.T
 	}
 }
 
+// A missing size is not the same thing as never having been sold. Boliga can
+// return sales that carry no square metres, and it drops family sales
+// altogether (boliga.go:313), so a home with a sales history of its own can
+// still arrive without a size. The warning has to fire on the size it is
+// actually about, and must not tell this user their home was never sold.
+func TestFormatLookupResponseWarnsWhenSoldPrimaryHasNoSize(t *testing.T) {
+	primary := testAddr("primary", "Flensborggade", "40")
+	primary.BoligaBuildingSize = 0
+	sizeless := testSale(2_900_000, 2022)
+	sizeless.SqMeters = 0
+	addrs, sales := withNeighbours(primary, []Sale{sizeless}, 4)
+
+	resp, err := FormatLookupResponse(addrs, map[int][]*Address{}, sales, 0)
+	if err != nil {
+		t.Fatalf("FormatLookupResponse: %v", err)
+	}
+
+	var explained bool
+	for _, w := range resp.Warnings {
+		if strings.Contains(w, "brugbar størrelse") {
+			explained = true
+		}
+		if strings.Contains(w, "ikke har været solgt") && !strings.Contains(w, "ofte fordi") {
+			t.Errorf("warning states this home was never sold, but it has a sale: %q", w)
+		}
+	}
+	if !explained {
+		t.Errorf("no warning explains the missing size; got %v", resp.Warnings)
+	}
+}
+
 // A home with a known size is valued as before: correcting primary_idx must
 // not disturb the ordinary case, only the one it was getting wrong.
 func TestFormatLookupResponseValuesSizedPrimary(t *testing.T) {
@@ -223,7 +254,7 @@ func TestFormatLookupResponseValuesSizedPrimary(t *testing.T) {
 		t.Fatal("no comps estimate for a primary of known size")
 	}
 	for _, w := range resp.Warnings {
-		if strings.Contains(w, "størrelse er ukendt") {
+		if strings.Contains(w, "brugbar størrelse") {
 			t.Errorf("warned about an unknown size for a primary of 60 m²: %q", w)
 		}
 	}

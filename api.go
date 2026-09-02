@@ -549,15 +549,21 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 	}
 
 	// Every home-specific figure — the comps estimate and the sqm projections
-	// — is scaled by the subject property's size, and Boliga only reveals a
-	// size for an address it has sales for (boliga.go:130). A home that has
-	// never been sold therefore has no known size and cannot be valued. Say
-	// so: the alternative is a dashboard that silently omits the number the
-	// user came for. Previously this case was hidden, because the estimate
-	// was computed against whichever sold neighbour fell at index 0.
+	// — is scaled by the subject property's size, and a size only ever reaches
+	// us from a matched Boliga sale that carried square metres
+	// (boliga.go:130). Without one the home cannot be valued at all. Say so:
+	// the alternative is a dashboard that silently omits the number the user
+	// came for. Previously this case was hidden, because the estimate was
+	// computed against whichever sold neighbour fell at index 0.
+	//
+	// Report the gap, not a cause. Never having been sold is the usual
+	// reason, but a failed street request, an address that matched no sale,
+	// a home sold only within a family (boliga.go:313 keeps "Alm. Salg" only)
+	// or a sale record with no square metres all land here too, and we cannot
+	// tell them apart from this side.
 	if addrs[0].BoligaBuildingSize == 0 {
 		resp.Warnings = append(resp.Warnings,
-			"Boligens størrelse er ukendt, da den ikke har været solgt. Derfor kan der ikke beregnes en værdi for netop denne bolig — områdets kvadratmeterpriser vises stadig.")
+			"Boliga har ikke oplyst en brugbar størrelse for denne bolig — ofte fordi den ikke har været solgt — så der kan ikke beregnes en værdi for netop denne bolig. Områdets kvadratmeterpriser vises stadig.")
 	}
 
 	return &resp, nil
