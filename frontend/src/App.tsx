@@ -69,8 +69,8 @@ export default function App() {
     setHasSearched(true);
     setExcludedAddrs(new Set());
     reset();
-    search(query, Number(range), Number(filter), () => {
-      startPolling(setResult, setSearchError);
+    search(query, Number(range), Number(filter), (lookupId) => {
+      startPolling(lookupId, setResult, setSearchError);
     });
   }, [query, range, filter, search, reset, startPolling, setResult, setSearchError]);
 

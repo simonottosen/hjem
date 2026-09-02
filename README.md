@@ -165,18 +165,29 @@ Request body:
 | `q` | string | Danish address query string (see [Address resolution](#address-resolution)) |
 | `ranges` | array of int | Search radii in metres, e.g. `[250, 500]` |
 | `filter_below_std` | int | IQR multiplier for outlier filtering. `0` disables filtering. `1` uses multiplier `1.5` (strict), `2` uses `2.0`, `3` uses `2.5` (lenient) |
+| `previous_lookup_id` | string | Optional. The caller's own previous `lookup_id`; that lookup is cancelled. Other clients' lookups are unaffected |
 
 Response:
 
 ```json
-{ "status": "accepted" }
+{ "status": "accepted", "lookup_id": "eca0a74c2acd8e0ba8f916f9b30ad032" }
 ```
 
-If a lookup is already in progress, posting a new request cancels the previous one.
+Each lookup gets its own session, so concurrent users do not interfere. The
+returned `lookup_id` is required to poll for progress, and knowing it is what
+authorises cancelling or reading that lookup — ids are 128 bits of
+`crypto/rand`.
 
-### `GET /api/progress`
+At most 8 lookups may be in flight at once; beyond that the server replies
+`429 Too Many Requests` rather than degrading every user's search against
+Boliga's shared rate limit. Finished lookups do not count towards the limit
+and stay readable for 15 minutes before being evicted.
 
-Returns the current stage and, once complete, the full result payload.
+### `GET /api/progress?id=<lookup_id>`
+
+Returns the current stage of that lookup and, once complete, its full result
+payload. An unknown or expired `id` returns `404 Not Found`, which tells the
+client to stop polling rather than wait on an id that will never advance.
 
 ```json
 {
@@ -358,6 +369,7 @@ go test ./...
 ├── math.go          # IQR outlier filtering and year-over-year stats
 ├── models.go        # GORM domain models (Address, Sale, DawaQueryCache)
 ├── progress.go      # Async progress tracking with mutex
+├── sessions.go      # Per-lookup session state: id, progress, cancellation, TTL
 ├── app/
 │   └── main.go      # Entry point: CLI flags, DB init, server start
 ├── frontend/
@@ -377,9 +389,19 @@ go test ./...
 
 ## Asynchronous Request Model
 
-Lookups do not block the HTTP response. When the frontend sends `POST /api/lookup`, the server spawns a goroutine and returns `202 Accepted` immediately. The frontend polls `GET /api/progress` every ~500 ms. The server writes to a `Progress` struct as each stage completes (address lookup, Boliga fetch, estimation, Dingeo). This avoids timeout issues with long-running reverse-proxy setups.
+Lookups do not block the HTTP response. When the frontend sends `POST /api/lookup`, the server spawns a goroutine and returns `202 Accepted` with a `lookup_id` immediately. The frontend polls `GET /api/progress?id=<lookup_id>` every ~2 s. The server writes to that lookup's own `Progress` struct as each stage completes (address lookup, Boliga fetch, estimation, Dingeo). This avoids timeout issues with long-running reverse-proxy setups.
 
-If a new lookup is submitted before the previous one finishes, the previous goroutine's context is cancelled and its result is discarded.
+Each lookup owns its `Progress` and its cancellation function, held in a
+session keyed by `lookup_id` (`sessions.go`). A client that starts a new search
+passes its previous `lookup_id`, which cancels that lookup and discards its
+result — but only that one. Concurrent searches by different clients run
+independently; a lookup taking four minutes is not disturbed by someone else
+searching in the meantime.
+
+An in-flight lookup is never evicted on age, because eviction cancels it and
+losing a slow-but-healthy search would be worse than holding the memory. A
+lookup still running after 30 minutes is treated as wedged and cancelled so it
+stops occupying one of the 8 concurrency slots.
 
 ## License
 

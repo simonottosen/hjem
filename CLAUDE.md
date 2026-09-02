@@ -43,10 +43,10 @@ docker run -p 8080:8080 hjem
 ## Architecture
 
 ### Request lifecycle
-1. Frontend `POST /api/lookup` (address + radius) → immediate 202 Accepted
-2. Backend spawns a goroutine running `runLookup()` in `api.go`
-3. Frontend polls `GET /api/progress` every ~500ms until `done: true`
-4. Backend updates a `Progress` struct (in `progress.go`) as each stage completes:
+1. Frontend `POST /api/lookup` (address + radius) → immediate 202 Accepted carrying a `lookup_id`
+2. Backend creates a session (`sessions.go`) and spawns a goroutine running `runLookup()` in `api.go`
+3. Frontend polls `GET /api/progress?id=<lookup_id>` every ~2s until `done: true`. A 404 means the session was replaced or expired, and the client stops polling instead of hanging
+4. Backend updates that session's own `Progress` struct (in `progress.go`) as each stage completes:
    - Adressevælger free-text address lookup → DAR radius search for nearby addresses
    - Boliga sales scrape (cached 10 days in DB via GORM)
    - Comps estimation (weighted by recency, size, rooms, age, distance)
@@ -64,6 +64,7 @@ docker run -p 8080:8080 hjem
 - `math.go` — IQR outlier filtering, year-over-year stats
 - `models.go` — GORM domain models (Address, Sale, CachedLookup)
 - `progress.go` — Async progress tracking struct
+- `sessions.go` — Per-lookup sessions keyed by `lookup_id`: each owns a `Progress` and a cancel func, so concurrent users don't cancel each other. Caps active lookups at 8 (429 beyond), evicts finished ones after 15 min
 - `health.go` — `/api/health` + Prometheus `/metrics`
 - `app/main.go` — Entry point: flags, DB init, server start
 
