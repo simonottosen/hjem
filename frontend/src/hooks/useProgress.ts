@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import type { ProgressEvent, LookupResponse } from "@/lib/types";
-import { fetchProgress } from "@/lib/api";
+import { fetchProgress, SessionGoneError } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -19,6 +19,7 @@ export function useProgress() {
 
   const startPolling = useCallback(
     (
+      lookupId: string,
       onResult: (data: LookupResponse) => void,
       onError: (msg: string) => void
     ) => {
@@ -28,7 +29,7 @@ export function useProgress() {
 
       const poll = async () => {
         try {
-          const data = await fetchProgress();
+          const data = await fetchProgress(lookupId);
           setProgress(data);
 
           if (data.stage === "done" && data.result) {
@@ -44,6 +45,13 @@ export function useProgress() {
             onErrorRef.current?.(data.message || "Ukendt fejl");
           }
         } catch (err) {
+          if (err instanceof SessionGoneError) {
+            // Not transient: this id will never come back, so polling it
+            // forever would leave the user on a spinner indefinitely.
+            stop();
+            onErrorRef.current?.(err.message);
+            return;
+          }
           console.warn("[hjem] Progress poll failed:", err);
           // Keep polling — transient network error
         }

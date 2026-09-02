@@ -41,8 +41,11 @@ type Progress struct {
 
 func NewProgress() *Progress {
 	return &Progress{
-		stage:  StageIdle,
-		notify: make(chan struct{}, 1),
+		stage: StageIdle,
+		// Set here rather than on first Update, because Snapshot reports
+		// elapsed time relative to it and a zero value would read as decades.
+		startedAt: time.Now(),
+		notify:    make(chan struct{}, 1),
 	}
 }
 
@@ -78,16 +81,13 @@ func (p *Progress) SetResult(result interface{}) {
 	p.mu.Unlock()
 }
 
-func (p *Progress) Reset() {
+// Finished reports whether this lookup has reached a terminal stage. The
+// session store uses it to tell sessions that still hold a running goroutine
+// from ones that only hold a result.
+func (p *Progress) Finished() bool {
 	p.mu.Lock()
-	p.stage = StageIdle
-	p.message = ""
-	p.current = 0
-	p.total = 0
-	p.result = nil
-	p.warnings = nil
-	p.startedAt = time.Now()
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	return p.stage == StageDone || p.stage == StageError
 }
 
 func (p *Progress) Snapshot() ProgressEvent {
