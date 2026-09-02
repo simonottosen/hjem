@@ -34,9 +34,15 @@ export function useProgress() {
           if (data.stage === "done" && data.result) {
             stop();
             const result = data.result as LookupResponse;
-            // Attach warnings from progress to the result
+            // Merge, don't assign. The result carries warnings the server
+            // derived from the data itself (an unvaluable subject property),
+            // while the progress stream carries the Boliga fetch failures;
+            // assigning either one over the other silently drops the rest.
+            // Fetch failures currently reach us through both, hence the dedupe.
             if (data.warnings?.length) {
-              result.warnings = data.warnings;
+              result.warnings = [
+                ...new Set([...(result.warnings ?? []), ...data.warnings]),
+              ];
             }
             onResultRef.current?.(result);
           } else if (data.stage === "error") {

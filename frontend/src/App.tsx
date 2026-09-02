@@ -55,8 +55,14 @@ export default function App() {
   // Filtered + recomputed data
   const filteredData = useFilteredData(data, excludedAddrs);
 
-  const hasResults =
-    !isLoading && !error && filteredData?.addresses && filteredData.addresses.length > 0;
+  // The searched address is always present in `addresses` — it is what
+  // primary_idx points at, whether or not it has ever been sold — so the
+  // address count no longer tells us whether the lookup found anything.
+  // Sales do. Judged on the unfiltered response so that excluding every
+  // neighbour narrows the dashboard rather than replacing it with a
+  // "nothing found" message.
+  const foundNoSales = !!data && (data.sales?.length ?? 0) === 0;
+  const hasResults = !isLoading && !error && !!filteredData && !foundNoSales;
 
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
@@ -119,7 +125,7 @@ export default function App() {
 
         {!isLoading && error && <ErrorAlert error={error} />}
 
-        {!isLoading && !error && data && (!data.addresses || data.addresses.length === 0) && (
+        {!isLoading && !error && foundNoSales && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             Ingen sammenlignelige salg fundet i området. Prøv at søge med en større radius.
           </div>
