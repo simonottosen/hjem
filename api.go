@@ -1,7 +1,6 @@
 package hjem
 
 import (
-	"context"
 	_ "embed"
 	"encoding/csv"
 	"encoding/json"
@@ -36,17 +35,16 @@ func NewServer(db *gorm.DB) *server {
 	return &server{
 		dc:       dc,
 		bc:       bc,
-		progress: NewProgress(),
+		sessions: newSessionStore(),
 		stats:    NewHealthStats(),
 	}
 }
 
 type server struct {
-	dc           DawaCacher
-	bc           BoligaCacher
-	stats        *HealthStats
-	progress     *Progress
-	cancelLookup context.CancelFunc
+	dc       DawaCacher
+	bc       BoligaCacher
+	stats    *HealthStats
+	sessions *sessionStore
 }
 
 func (s *server) handleLookup() http.HandlerFunc {
@@ -54,51 +52,62 @@ func (s *server) handleLookup() http.HandlerFunc {
 		Query  string `json:"q"`
 		Ranges []int  `json:"ranges"`
 		Filter int    `json:"filter_below_std"`
+		// PreviousID is the caller's own last lookup id, if it has one. It is
+		// what makes "a new search replaces my old one" work without also
+		// replacing other users' searches.
+		PreviousID string `json:"previous_lookup_id"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Cancel any previous in-flight lookup to prevent result races
-		if s.cancelLookup != nil {
-			s.cancelLookup()
-		}
-
-		s.progress.Reset()
-
 		var req Request
 		body := http.MaxBytesReader(w, r.Body, maxBytesLimit)
 		defer body.Close()
 
-		err := json.NewDecoder(body).Decode(&req)
-		if err != nil {
-			s.progress.Update(StageError, err.Error(), 0, 0)
+		// Decoded before a session exists, so a malformed body is reported
+		// through the status code alone — there is no id to poll for it.
+		if err := json.NewDecoder(body).Decode(&req); err != nil {
 			replyJSONErr(w, err, http.StatusBadRequest)
+			return
+		}
+
+		sess, err := s.sessions.Create(req.PreviousID)
+		if err != nil {
+			replyJSONErr(w, err, http.StatusTooManyRequests)
 			return
 		}
 
 		// Run the lookup in a background goroutine so the HTTP response
 		// returns immediately. The frontend polls /api/progress for status
 		// and the result. This avoids Cloudflare tunnel timeouts.
-		ctx, cancel := context.WithCancel(context.Background())
-		s.cancelLookup = cancel
-		go s.runLookup(ctx, req.Query, req.Ranges, req.Filter)
+		go s.runLookup(sess, req.Query, req.Ranges, req.Filter)
 
 		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":    "accepted",
+			"lookup_id": sess.ID,
+		})
 	}
 }
 
-func (s *server) runLookup(ctx context.Context, query string, ranges []int, filter int) {
+func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filter int) {
 	s.stats.RecordLookup()
 
-	// Helper: check if this lookup was cancelled (replaced by a newer search)
-	cancelled := func() bool { return ctx.Err() != nil }
+	// Releases the context once this lookup is done one way or another.
+	// Nothing reads it after we return, so cancelling here is free.
+	defer sess.cancel()
 
-	s.progress.Update(StageDawa, "Søger adresse...", 0, 0)
+	p := sess.Progress
+
+	// Helper: check if this lookup was cancelled (replaced by a newer search
+	// from the same client, or evicted for running implausibly long)
+	cancelled := func() bool { return sess.ctx.Err() != nil }
+
+	p.Update(StageDawa, "Søger adresse...", 0, 0)
 	addrs, err := s.dc.Do(AVFuzzySearch{
 		Query: query,
 	})
 	if err != nil {
-		s.progress.Update(StageError, err.Error(), 0, 0)
+		p.Update(StageError, err.Error(), 0, 0)
 		return
 	}
 	if cancelled() {
@@ -107,20 +116,20 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 	}
 
 	if len(addrs) > 1 {
-		s.progress.Update(StageError, "non-unique address, be more specific", 0, 0)
+		p.Update(StageError, "non-unique address, be more specific", 0, 0)
 		return
 	}
 
 	if len(addrs) == 0 {
-		s.progress.Update(StageError, "no found address", 0, 0)
+		p.Update(StageError, "no found address", 0, 0)
 		return
 	}
 	addr := addrs[0]
 
-	s.progress.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
+	p.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
 	rangeMap, err := s.constructRanges(addr, ranges)
 	if err != nil {
-		s.progress.Update(StageError, err.Error(), 0, 0)
+		p.Update(StageError, err.Error(), 0, 0)
 		return
 	}
 	if cancelled() {
@@ -132,10 +141,10 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 		addrs = append(addrs, addrsInRange...)
 	}
 
-	s.progress.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
-	sales, fetchWarnings, err := s.bc.FetchSales(addrs, s.progress, s.stats)
+	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
+	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats)
 	if err != nil {
-		s.progress.Update(StageError, err.Error(), 0, 0)
+		p.Update(StageError, err.Error(), 0, 0)
 		return
 	}
 	if cancelled() {
@@ -145,14 +154,14 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 
 	// Add any partial-failure warnings
 	for _, w := range fetchWarnings {
-		s.progress.AddWarning(w)
+		p.AddWarning(w)
 	}
 
 	addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
 
 	luResp, err := FormatLookupResponse(addrs, rangeMap, sales, filter)
 	if err != nil {
-		s.progress.Update(StageError, err.Error(), 0, 0)
+		p.Update(StageError, err.Error(), 0, 0)
 		return
 	}
 
@@ -171,8 +180,8 @@ func (s *server) runLookup(ctx context.Context, query string, ranges []int, filt
 	luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
 
 	// Store result and mark done
-	s.progress.SetResult(luResp)
-	s.progress.Update(StageDone, "Færdig!", 0, 0)
+	p.SetResult(luResp)
+	p.Update(StageDone, "Færdig!", 0, 0)
 }
 
 func (s *server) handleCSVDownload() http.HandlerFunc {
@@ -255,7 +264,16 @@ func (s *server) handleProgress() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Write(s.progress.SnapshotJSON())
+
+		sess, ok := s.sessions.Get(r.URL.Query().Get("id"))
+		if !ok {
+			// 404 rather than an idle progress event: an unknown id will never
+			// advance, so the client has to be told to stop polling it.
+			replyJSONErr(w, ErrUnknownSession, http.StatusNotFound)
+			return
+		}
+
+		w.Write(sess.Progress.SnapshotJSON())
 	}
 }
 
@@ -270,7 +288,7 @@ func (s *server) handleHealth() http.HandlerFunc {
 func (s *server) handleMetrics() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		w.Write([]byte(s.stats.PrometheusMetrics()))
+		w.Write([]byte(s.stats.PrometheusMetrics() + s.sessions.PrometheusMetrics()))
 	}
 }
 
