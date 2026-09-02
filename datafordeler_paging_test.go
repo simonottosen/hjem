@@ -105,10 +105,15 @@ func TestDARPostAllSinglePage(t *testing.T) {
 	}
 }
 
-// A server claiming hasNextPage while returning no cursor would otherwise pin
-// the walk on page one forever. Stop instead of spinning.
-func TestDARPostAllStopsOnEmptyCursor(t *testing.T) {
+// A server claiming hasNextPage while returning no cursor has given us no way
+// to reach the rest of the result set. Returning the first page as if it were
+// complete would be the silent under-sampling this pagination exists to
+// remove, so it has to surface as an error — and only one request may be made,
+// since reusing the empty cursor would re-request page one forever.
+func TestDARPostAllErrorsOnMissingCursor(t *testing.T) {
+	var n int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
 		fmt.Fprint(w, `{"data":{"DAR_Husnummer":{
 			"pageInfo":{"hasNextPage":true,"endCursor":""},
 			"nodes":[{"id_lokalId":"only","adgangspunkt":"p"}]}}}`)
@@ -116,11 +121,17 @@ func TestDARPostAllStopsOnEmptyCursor(t *testing.T) {
 	defer srv.Close()
 
 	got, err := darPageAll(srv.URL)
-	if err != nil {
-		t.Fatalf("darPostAll: %v", err)
+	if err == nil {
+		t.Fatalf("expected an error, got %d nodes", len(got))
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d nodes, want 1", len(got))
+	if !strings.Contains(err.Error(), "no cursor") {
+		t.Errorf("error %q does not name the missing cursor", err)
+	}
+	if got != nil {
+		t.Errorf("got %d nodes alongside the error, want none", len(got))
+	}
+	if n != 1 {
+		t.Errorf("made %d requests, want 1", n)
 	}
 }
 

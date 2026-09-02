@@ -438,9 +438,7 @@ func darPostAll[R any, N any](endpoint, query string, pick func(*R) *darConnecti
 		conn := pick(&resp)
 		all = append(all, conn.Nodes...)
 
-		// An empty cursor with more pages claimed would loop forever on the
-		// same page, so treat it as the end.
-		if !conn.PageInfo.HasNextPage || conn.PageInfo.EndCursor == "" {
+		if !conn.PageInfo.HasNextPage {
 			// Only worth logging when paging actually happened; single-page
 			// queries are the common case and would drown out the signal.
 			if page > 1 {
@@ -448,6 +446,15 @@ func darPostAll[R any, N any](endpoint, query string, pick func(*R) *darConnecti
 			}
 			return all, nil
 		}
+
+		// Another page is claimed, but there is no cursor to reach it. Reusing
+		// the empty cursor would re-request the same page forever, and
+		// returning what we have would be exactly the silent under-sampling
+		// this pagination exists to remove — so fail loudly instead.
+		if conn.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("DAR claimed another page after %d page(s) (%d nodes) but returned no cursor", page, len(all))
+		}
+
 		if page >= darMaxPages {
 			return nil, fmt.Errorf("DAR pagination exceeded %d pages (%d nodes so far); refusing to continue", darMaxPages, len(all))
 		}
