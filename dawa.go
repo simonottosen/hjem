@@ -37,7 +37,7 @@ type DAWAAddress struct {
 
 type Address struct {
 	ID               uint    `json:"-" gorm:"primaryKey"`
-	DawaUUID         string  `json:"dawa_uuid" gorm:"not null"`
+	DawaUUID         string  `json:"dawa_uuid" gorm:"not null;uniqueIndex:idx_addresses_dawa_uuid,where:dawa_uuid <> ''"`
 	DawaID           string  `json:"full_txt" gorm:"not null;unique"`
 	StreetName       string  `json:"street_name" gorm:"not null"`
 	StreetNumber     string  `json:"street_number" gorm:"not null"`
@@ -158,7 +158,18 @@ type DawaCacher interface {
 
 func NewDawaCacher(db *gorm.DB) *dawaCacher {
 	db.AutoMigrate(&DawaQueryCache{})
-	db.AutoMigrate(&Address{})
+	// The unique index on dawa_uuid is partial (`where dawa_uuid <> ''`) because
+	// rows written before that column was populated all carry an empty string,
+	// and a plain unique index would reject every deployment that has any.
+	//
+	// It still cannot be created on a database that already holds the duplicates
+	// this index exists to prevent. Those rows stay usable — a lookup resolves to
+	// the oldest copy — and collapsing them would drop the sales cached against
+	// the copies discarded, so warn and carry on instead of refusing to boot.
+	if err := db.AutoMigrate(&Address{}); err != nil {
+		log.Printf("Address migration incomplete: %v", err)
+		log.Printf("  If the unique index on dawa_uuid was rejected, list the duplicates with: SELECT dawa_uuid, COUNT(*) c FROM addresses WHERE dawa_uuid <> '' GROUP BY dawa_uuid HAVING c > 1;")
+	}
 
 	return &dawaCacher{
 		maxAmount: 50.0,
@@ -247,31 +258,54 @@ func (c dawaCacher) safeCreateOrGetAddrs(addrs []*Address) error {
 	n := float64(len(addrs))
 	r := int(math.Ceil(n / c.maxAmount))
 
-	m := map[string]*Address{}
+	// DawaUUID is the key, because DawaID is a formatted address string: the
+	// smallest disagreement between DAR and DAWA over a comma or a floor
+	// abbreviation made the same physical address look new and get inserted
+	// twice. DawaID is only still matched for the rows that predate the column.
+	byUUID := map[string]*Address{}
+	byID := map[string]*Address{}
 	for i := 0; i < r; i++ {
 		start, end := int(c.maxAmount)*i, int(c.maxAmount)*(i+1)
 		end = int(math.Min(n, float64(end)))
 
 		var tempAddrs []*Address
+		uuids := make([]string, 0, end-start)
 		ids := make([]string, end-start)
 		for j, a := range addrs[start:end] {
 			ids[j] = a.DawaID
+			if a.DawaUUID != "" {
+				uuids = append(uuids, a.DawaUUID)
+			}
 		}
 
-		if err := c.db.Where("dawa_id IN ?", ids).Find(&tempAddrs).Error; err != nil {
+		if err := c.db.Where("dawa_uuid IN ? OR dawa_id IN ?", uuids, ids).Order("id").Find(&tempAddrs).Error; err != nil {
 			return err
 		}
 
 		for j, _ := range tempAddrs {
 			a := tempAddrs[j]
-			m[a.DawaID] = a
+			if a.DawaUUID == "" {
+				byID[a.DawaID] = a
+				continue
+			}
+
+			// Ordered by ID, so a duplicate pair left behind by the old keying
+			// resolves to its oldest copy on every lookup instead of flapping.
+			if _, dup := byUUID[a.DawaUUID]; !dup {
+				byUUID[a.DawaUUID] = a
+			}
 		}
 	}
 
 	var createAddrs []*Address
 	for i, _ := range addrs {
 		a := addrs[i]
-		exsts, ok := m[a.DawaID]
+		// byUUID never holds the empty key, so an address without a UUID falls
+		// through to the pre-UUID rows on its own.
+		exsts, ok := byUUID[a.DawaUUID]
+		if !ok {
+			exsts, ok = byID[a.DawaID]
+		}
 		if !ok {
 			createAddrs = append(createAddrs, a)
 			continue
