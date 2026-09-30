@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -544,6 +545,13 @@ func chunk(s []string, size int) [][]string {
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// n counts bytes, so back off to a rune boundary before cutting. The
+	// original caller truncates an ASCII WKT polygon and never notices; Danish
+	// addresses are full of æ/ø/å and would otherwise be cut mid-rune, emitting
+	// invalid UTF-8 into the log.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }
