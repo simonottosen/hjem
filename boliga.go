@@ -267,6 +267,8 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 			errType := "unknown"
 			if strings.Contains(err.Error(), "429") {
 				errType = "rate_limit"
+			} else if strings.Contains(err.Error(), "status 403") {
+				errType = "forbidden"
 			} else if strings.Contains(err.Error(), "status 5") {
 				errType = "server_error"
 			}
@@ -343,6 +345,11 @@ func classifyError(err error) string {
 	if strings.Contains(msg, "429") {
 		return "midlertidig blokering fra Boliga"
 	}
+	// Deliberately not "midlertidig": a 403 is not a rate limit waiting to
+	// expire, and telling the user to try again later would be wrong.
+	if strings.Contains(msg, "status 403") {
+		return "blokeret af Boliga"
+	}
 	if strings.Contains(msg, "status 5") {
 		return "serverfejl hos Boliga"
 	}
@@ -364,9 +371,13 @@ type BoligaPropertyRequest struct {
 	MunicipalityID int
 }
 
+// A var, not a const, so tests can point the fetch at an httptest server —
+// the same seam ADRESSEVAELGER_URL gives adressevaelger.go. Note this is a
+// different host from boligaBaseUrl above.
+var boligaSoldSearchURL = "https://api.boliga.dk/api/v2/sold/search/results"
+
 func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
-	endpoint := "https://api.boliga.dk/api/v2/sold/search/results"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequest("GET", boligaSoldSearchURL, nil)
 	if err != nil {
 		return nil, err
 	}

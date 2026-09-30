@@ -60,8 +60,13 @@ func (r *RetryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			return nil, err
 		}
 
-		// Success — no retry needed
-		if resp.StatusCode < 429 {
+		// Non-retryable — hand the response back, successful or not. This used
+		// to read `< 429` under a "success" comment, so one comparison stood in
+		// for both "did it work" and "is it worth trying again", and every 4xx
+		// below 429 was quietly filed as a success. A 403 from a scrape target
+		// does belong here — a 2s..32s backoff will not talk it round — but it
+		// belongs here deliberately rather than by accident of the threshold.
+		if resp.StatusCode != 429 && resp.StatusCode < 500 {
 			return resp, nil
 		}
 

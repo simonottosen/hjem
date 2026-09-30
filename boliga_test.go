@@ -1,6 +1,8 @@
 package hjem
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -76,5 +78,50 @@ func TestDanishDateToTime(t *testing.T) {
 				t.Fatalf("unexpected output: %v (expected: %v)", o, tc.out)
 			}
 		})
+	}
+}
+
+// TestBoligaForbiddenNotRetried pins the behaviour issue #30 was about: a 403
+// must be attempted once and then reported as a block, not retried and not
+// filed as a generic network error.
+func TestBoligaForbiddenNotRetried(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	orig := boligaSoldSearchURL
+	boligaSoldSearchURL = srv.URL
+	defer func() { boligaSoldSearchURL = orig }()
+
+	addrs := []*Address{{
+		MunicipalityCode: "0101",
+		StreetName:       "Vestergade",
+		PostalCode:       "1456",
+		StreetNumber:     "1",
+	}}
+	stats := NewHealthStats()
+
+	_, warnings, err := BoligaSalesFromAddrs(addrs, NewProgress(), stats)
+	if err == nil {
+		t.Fatal("expected an error when the only street request is refused")
+	}
+
+	// The load-bearing assertion. Retrying would make this 6 (1 + maxRetries)
+	// and cost ~62s of backoff per blocked street for a refusal that will not
+	// change on a retry.
+	if requests != 1 {
+		t.Errorf("made %d requests, want 1 — a 403 must not be retried", requests)
+	}
+
+	recent := stats.Snapshot().RecentErrors
+	if len(recent) != 1 || recent[0].Type != "forbidden" {
+		t.Errorf("recorded %+v, want a single error of type \"forbidden\"", recent)
+	}
+
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "blokeret af Boliga") {
+		t.Errorf("warnings = %v, want one mentioning \"blokeret af Boliga\"", warnings)
 	}
 }
