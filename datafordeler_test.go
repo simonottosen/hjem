@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // On the central meridian (lon = 9°E) the easting is exactly the false easting,
@@ -113,5 +114,25 @@ func TestCirclePolygonWKT(t *testing.T) {
 		if math.Abs(d-radius) > 1e-3 {
 			t.Errorf("vertex %q is %.3f m from centre, want %.1f", c, d, radius)
 		}
+	}
+}
+
+// truncate cuts at a byte count, so a Danish address can land mid-rune. The
+// unmatched-sales log in boliga.go is the caller that makes this reachable.
+func TestTruncateDoesNotSplitRunes(t *testing.T) {
+	// "ø" is two bytes (0xC3 0xB8) at offsets 1-2. Cutting at 2 lands between them.
+	const s = "Søndergårdsvej 12"
+	for n := 1; n < len(s); n++ {
+		got := truncate(s, n)
+		if !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q, which is not valid UTF-8", s, n, got)
+		}
+		if !strings.HasPrefix(s, strings.TrimSuffix(got, "…")) {
+			t.Errorf("truncate(%q, %d) = %q, which is not a prefix of the input", s, n, got)
+		}
+	}
+
+	if got := truncate(s, len(s)); got != s {
+		t.Errorf("truncate at full length = %q, want the input unchanged", got)
 	}
 }
