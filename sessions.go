@@ -52,6 +52,13 @@ type lookupSession struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	createdAt time.Time
+
+	// boligaIngest carries the browser's fetched sales to the waiting lookup
+	// goroutine. Buffered so the HTTP handler can hand off and return without
+	// caring whether anyone is still listening — a POST that arrives after the
+	// lookup gave up waiting must not block the request, and the unread value
+	// is collected along with the session.
+	boligaIngest chan *BoligaIngest
 }
 
 type sessionStore struct {
@@ -100,11 +107,12 @@ func (st *sessionStore) Create(previousID string) (*lookupSession, error) {
 	// lookup goroutine exists, so nothing races on it.
 	p.now = st.now
 	sess := &lookupSession{
-		ID:        newSessionID(),
-		Progress:  p,
-		ctx:       ctx,
-		cancel:    cancel,
-		createdAt: st.now(),
+		ID:           newSessionID(),
+		Progress:     p,
+		ctx:          ctx,
+		cancel:       cancel,
+		createdAt:    st.now(),
+		boligaIngest: make(chan *BoligaIngest, 1),
 	}
 	st.sessions[sess.ID] = sess
 
