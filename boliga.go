@@ -265,7 +265,7 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 		if err != nil {
 			failedReqs++
 			errType := "unknown"
-			if strings.Contains(err.Error(), "429") {
+			if strings.Contains(err.Error(), "status 429") {
 				errType = "rate_limit"
 			} else if strings.Contains(err.Error(), "status 403") {
 				errType = "forbidden"
@@ -342,7 +342,10 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 // classifyError returns a user-friendly Danish description of an error.
 func classifyError(err error) string {
 	msg := err.Error()
-	if strings.Contains(msg, "429") {
+	// "status 429", not "429": Fetch formats failures as "<street> <zip>:
+	// status <code>", so a bare "429" also matches postcodes 1429 and 4291 and
+	// would report every failure on those streets as a rate limit.
+	if strings.Contains(msg, "status 429") {
 		return "midlertidig blokering fra Boliga"
 	}
 	// Deliberately not "midlertidig": a 403 is not a rate limit waiting to
