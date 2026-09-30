@@ -3,6 +3,7 @@ package hjem
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -223,5 +224,197 @@ func TestDawaCacherHealsPreexistingEmptyEntry(t *testing.T) {
 	}
 	if len(addrs) != 1 || addrs[0].StreetName != "Højgaardsvej" {
 		t.Fatalf("got %+v, want the re-resolved address", addrs)
+	}
+}
+
+const addrUniqueIndex = "idx_addresses_dawa_uuid"
+
+// newTestDB gives a test its own database. The shared in-memory DSN used by
+// newTestCacher is process-wide, which the tests below cannot tolerate: they
+// seed conflicting rows and re-run the migration.
+func newTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "hjem.db")), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err == nil {
+			sqlDB.Close()
+		}
+	})
+	return db
+}
+
+func countAddrs(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var n int64
+	if err := db.Model(&Address{}).Count(&n).Error; err != nil {
+		t.Fatalf("count addresses: %v", err)
+	}
+	return n
+}
+
+// TestSafeCreateOrGetAddrsDedupesOnUUID covers #21. DawaID holds a formatted
+// address string, and DAWA's betegnelse and DAR's adressebetegnelse need not
+// agree on a comma or a floor abbreviation. Keying the dedupe on it turned one
+// physical address into two rows, silently, with no constraint to catch it.
+func TestSafeCreateOrGetAddrsDedupesOnUUID(t *testing.T) {
+	c := NewDawaCacher(newTestDB(t))
+
+	const uuid = "70865c44-d570-44e7-a6f5-6f7c90add725"
+	dawaSpelling := []*Address{{
+		DawaUUID:         uuid,
+		DawaID:           "Testvej 1, 1. tv, 8000 Aarhus C",
+		StreetName:       "Testvej",
+		StreetNumber:     "1",
+		PostalCode:       "8000",
+		MunicipalityCode: "0751",
+	}}
+	if err := c.safeCreateOrGetAddrs(dawaSpelling); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+
+	darSpelling := []*Address{{
+		DawaUUID:         uuid,
+		DawaID:           "Testvej 1, 1 tv, 8000 Aarhus C",
+		StreetName:       "Testvej",
+		StreetNumber:     "1",
+		PostalCode:       "8000",
+		MunicipalityCode: "0751",
+	}}
+	if err := c.safeCreateOrGetAddrs(darSpelling); err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	if n := countAddrs(t, c.db); n != 1 {
+		t.Fatalf("%d address rows, want 1 — the two spellings are the same address", n)
+	}
+	if darSpelling[0].ID != dawaSpelling[0].ID {
+		t.Errorf("resolved to row %d, want the existing row %d", darSpelling[0].ID, dawaSpelling[0].ID)
+	}
+}
+
+// TestSafeCreateOrGetAddrsBackfillsPreUUIDRow covers the rows written before
+// DawaUUID was populated. They can only be matched on DawaID, so that match has
+// to stay available for them — but per row, never through a single blank-UUID
+// key, which would fold every one of them together.
+func TestSafeCreateOrGetAddrsBackfillsPreUUIDRow(t *testing.T) {
+	c := NewDawaCacher(newTestDB(t))
+
+	legacy := []*Address{
+		{DawaID: "Gammelvej 2, 2. th, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "2", PostalCode: "5000", MunicipalityCode: "0461"},
+		{DawaID: "Gammelvej 4, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "4", PostalCode: "5000", MunicipalityCode: "0461"},
+	}
+	if err := c.db.Create(&legacy).Error; err != nil {
+		t.Fatalf("seed pre-UUID rows: %v", err)
+	}
+
+	fresh := []*Address{
+		{DawaUUID: "uuid-2", DawaID: "Gammelvej 2, 2. th, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "2", PostalCode: "5000", MunicipalityCode: "0461"},
+		{DawaUUID: "uuid-4", DawaID: "Gammelvej 4, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "4", PostalCode: "5000", MunicipalityCode: "0461"},
+	}
+	if err := c.safeCreateOrGetAddrs(fresh); err != nil {
+		t.Fatalf("resolve against pre-UUID rows: %v", err)
+	}
+
+	if n := countAddrs(t, c.db); n != 2 {
+		t.Fatalf("%d address rows, want 2 — the pre-UUID rows must be reused, not duplicated", n)
+	}
+	for i := range fresh {
+		if fresh[i].ID != legacy[i].ID {
+			t.Errorf("address %d resolved to row %d, want %d", i, fresh[i].ID, legacy[i].ID)
+		}
+	}
+
+	var backfilled []*Address
+	if err := c.db.Order("id").Find(&backfilled).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	for i, want := range []string{"uuid-2", "uuid-4"} {
+		if backfilled[i].DawaUUID != want {
+			t.Errorf("row %d has DawaUUID %q, want %q", backfilled[i].ID, backfilled[i].DawaUUID, want)
+		}
+	}
+
+	// With the UUID backfilled, a drifted spelling now resolves to the same row.
+	drifted := []*Address{{DawaUUID: "uuid-2", DawaID: "Gammelvej 2, 2 th, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "2", PostalCode: "5000", MunicipalityCode: "0461"}}
+	if err := c.safeCreateOrGetAddrs(drifted); err != nil {
+		t.Fatalf("resolve drifted spelling: %v", err)
+	}
+	if n := countAddrs(t, c.db); n != 2 {
+		t.Fatalf("%d address rows after the drifted spelling, want 2", n)
+	}
+	if drifted[0].ID != legacy[0].ID {
+		t.Errorf("drifted spelling resolved to row %d, want %d", drifted[0].ID, legacy[0].ID)
+	}
+}
+
+// TestAddressMigrationToleratesPreUUIDRows pins why the unique index is partial.
+// Every deployment that predates DawaUUID holds rows with an empty one, and a
+// plain unique index would reject the lot on the first boot after this change.
+func TestAddressMigrationToleratesPreUUIDRows(t *testing.T) {
+	db := newTestDB(t)
+	NewDawaCacher(db)
+	if err := db.Migrator().DropIndex(&Address{}, addrUniqueIndex); err != nil {
+		t.Fatalf("drop index to simulate the old schema: %v", err)
+	}
+
+	preUUID := []*Address{
+		{DawaID: "Gammelvej 2, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "2", PostalCode: "5000", MunicipalityCode: "0461"},
+		{DawaID: "Gammelvej 4, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "4", PostalCode: "5000", MunicipalityCode: "0461"},
+	}
+	if err := db.Create(&preUUID).Error; err != nil {
+		t.Fatalf("seed pre-UUID rows: %v", err)
+	}
+
+	if err := db.AutoMigrate(&Address{}); err != nil {
+		t.Fatalf("migration rejected rows with an empty DawaUUID: %v", err)
+	}
+	if !db.Migrator().HasIndex(&Address{}, addrUniqueIndex) {
+		t.Fatal("unique index was not created")
+	}
+}
+
+// TestNewDawaCacherBootsWithDuplicateDawaUUID covers the databases that already
+// carry the duplicates this fix prevents: the index cannot be created there, so
+// the server has to come up without it rather than die in AutoMigrate.
+func TestNewDawaCacherBootsWithDuplicateDawaUUID(t *testing.T) {
+	db := newTestDB(t)
+	NewDawaCacher(db)
+	if err := db.Migrator().DropIndex(&Address{}, addrUniqueIndex); err != nil {
+		t.Fatalf("drop index to simulate the old schema: %v", err)
+	}
+
+	const uuid = "70865c44-d570-44e7-a6f5-6f7c90add725"
+	dupes := []*Address{
+		{DawaUUID: uuid, DawaID: "Testvej 1, 1. tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+		{DawaUUID: uuid, DawaID: "Testvej 1, 1 tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+	}
+	if err := db.Create(&dupes).Error; err != nil {
+		t.Fatalf("seed duplicates: %v", err)
+	}
+
+	c := NewDawaCacher(db)
+	if db.Migrator().HasIndex(&Address{}, addrUniqueIndex) {
+		t.Fatal("unique index was created over duplicate rows")
+	}
+
+	// The duplicates stay, but every lookup resolves to the oldest copy instead
+	// of flapping between them.
+	for i := 0; i < 3; i++ {
+		got := []*Address{{DawaUUID: uuid, DawaID: "Testvej 1, 1.tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"}}
+		if err := c.safeCreateOrGetAddrs(got); err != nil {
+			t.Fatalf("resolve on a duplicated database: %v", err)
+		}
+		if got[0].ID != dupes[0].ID {
+			t.Fatalf("resolved to row %d, want the oldest copy %d", got[0].ID, dupes[0].ID)
+		}
+	}
+	if n := countAddrs(t, db); n != 2 {
+		t.Fatalf("%d address rows, want the 2 seeded duplicates and nothing new", n)
 	}
 }
