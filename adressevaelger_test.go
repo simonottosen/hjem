@@ -2,6 +2,7 @@ package hjem
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -764,5 +765,32 @@ func TestAVChainExhausted(t *testing.T) {
 	}
 	if len(addrs) != 0 {
 		t.Fatalf("got %d addresses, want 0", len(addrs))
+	}
+}
+
+// TestAVTokenRejected covers the failure that brugerstyring will introduce.
+// The distinction it asserts is the whole point: a rejected token must not be
+// reported as a missing address, or the first symptom of an expired credential
+// is every user being told their address does not exist.
+func TestAVTokenRejected(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var calls int
+			avTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(status)
+			})
+
+			_, err := AVFuzzySearch{Query: "Rådhuspladsen 1"}.Fetch()
+			if !errors.Is(err, ErrAVTokenRejected) {
+				t.Fatalf("err = %v, want it to wrap ErrAVTokenRejected", err)
+			}
+			// The re-spelling and /vask/ fallbacks exist for addresses that
+			// genuinely return no hits. Retrying them with the same rejected
+			// token would only turn one clear error into three.
+			if calls != 1 {
+				t.Errorf("made %d requests, want 1 — a fallback retried a rejected token", calls)
+			}
+		})
 	}
 }

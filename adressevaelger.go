@@ -2,6 +2,7 @@ package hjem
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -133,6 +134,14 @@ func avToken() string {
 	return avDefaultToken
 }
 
+// ErrAVTokenRejected separates "our token is no longer accepted" from "that
+// address does not exist". Both end the lookup the same way today, but only
+// one of them is the operator's problem: brugerstyring is not switched on yet
+// (hence the public default token), and when it is, every lookup would start
+// reporting a missing address unless the rejection says so itself. Phrased in
+// Danish because api.go renders it straight to the user.
+var ErrAVTokenRejected = errors.New("Adressevælger afviste vores token — kontrollér ADRESSEVAELGER_TOKEN")
+
 // avSearchResponse is the /adresser/soeg payload.
 type avSearchResponse struct {
 	Status      string `json:"status"`
@@ -240,6 +249,11 @@ func avGet(path string, query url.Values, out any) error {
 		return fmt.Errorf("Adressevælger request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		log.Printf("[hjem] Adressevælger rejected our token (status %d for %s) — set ADRESSEVAELGER_TOKEN", resp.StatusCode, path)
+		return fmt.Errorf("%w (status %d)", ErrAVTokenRejected, resp.StatusCode)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("Adressevælger returned status %d for %s", resp.StatusCode, path)
