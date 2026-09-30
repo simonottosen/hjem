@@ -11,6 +11,13 @@ import (
 var (
 	ErrInvalidZipCodes     = errors.New("invalid zip code format")
 	ErrInvalidPropertyType = errors.New("invalid property type format")
+
+	// Deprecated: never returned. The only code that produced this was
+	// (*Store).SaveSale, which called DawaFuzzySearch — removed in the
+	// Datafordeleren migration. Kept because the module path is public, so
+	// deleting it would break a downstream build; an errors.Is against it
+	// has been permanently false since SaveSale went away.
+	ErrUnknownAddr = errors.New("unknown address")
 )
 
 type Config struct {
