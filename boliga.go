@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -304,7 +305,8 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 		zNorm[normalizeAddr(short)] = i
 	}
 
-	var exactMatches, normMatches, skippedSaleType int
+	var exactMatches, normMatches, skippedSaleType, missed int
+	missedStreets := map[string]string{}
 	result := make([][]BoligaSaleItem, len(addrs))
 	for i := range totalSales {
 		s := totalSales[i]
@@ -328,11 +330,30 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 			result[j] = append(result[j], s)
 			continue
 		}
+
+		// Dropped. Keep one example per street rather than the first few
+		// overall: totalSales is assembled street by street, so a first-N
+		// sample would come entirely from whichever street happened to be
+		// fetched first and would say nothing about the rest.
+		missed++
+		street, _ := avSplitStreet(s.Addr)
+		if _, seen := missedStreets[street]; !seen {
+			missedStreets[street] = s.Addr
+		}
 	}
 	totalMatched := exactMatches + normMatches
-	log.Printf("Boliga matched %d exact + %d normalized = %d/%d sales (skipped %d non-alm. salg)",
+	log.Printf("Boliga matched %d exact + %d normalized = %d/%d sales (skipped %d non-alm. salg, %d unmatched)",
 		exactMatches, normMatches,
-		totalMatched, len(totalSales), skippedSaleType)
+		totalMatched, len(totalSales), skippedSaleType, missed)
+	if missed > 0 {
+		examples := make([]string, 0, len(missedStreets))
+		for _, addr := range missedStreets {
+			examples = append(examples, addr)
+		}
+		sort.Strings(examples)
+		log.Printf("Boliga unmatched %d sales across %d streets, one example each: %s",
+			missed, len(missedStreets), truncate(strings.Join(examples, ", "), 300))
+	}
 
 	return result, warnings, nil
 }
