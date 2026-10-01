@@ -1,4 +1,4 @@
-import type { ProgressEvent } from "./types";
+import type { ProgressEvent, BoligaRelayOutcome } from "./types";
 
 // Thrown when the server no longer recognises a lookup id: it was replaced by
 // a newer search or it aged out. Polling cannot recover from this, so it is a
@@ -41,6 +41,31 @@ export async function startLookup(
     throw new Error("Serveren returnerede ikke et lookup-id");
   }
   return lookupId as string;
+}
+
+// Hand the streets we fetched back to the lookup that asked for them. The
+// server treats anything missing as failed and fetches it itself, so a failure
+// here costs latency but never results — hence no throw.
+export async function postBoligaIngest(
+  lookupId: string,
+  outcome: BoligaRelayOutcome
+): Promise<void> {
+  try {
+    const resp = await fetch("/api/boliga/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        lookup_id: lookupId,
+        fetched: outcome.fetched,
+        failed: outcome.failed,
+      }),
+    });
+    if (!resp.ok) {
+      console.warn("[hjem] Boliga ingest rejected:", { status: resp.status });
+    }
+  } catch (err) {
+    console.warn("[hjem] Boliga ingest failed, server will refetch:", err);
+  }
 }
 
 // Poll progress (returns progress + result when done)

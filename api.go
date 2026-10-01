@@ -30,8 +30,14 @@ const (
 // dozens of streets, while still not stranding a lookup whose tab was closed
 // the moment it started.
 //
+// Boliga throttles to about one request per second per IP, so a browser cannot
+// go faster than roughly one street per second however it is written — a
+// measured 500 m search is 24 streets. This must therefore exceed the client's
+// own BUDGET_MS (frontend/src/lib/boliga.ts), or the server would start
+// refetching streets the browser is still on and do the work twice.
+//
 // A var so tests can shorten it, like boligaSoldSearchURL.
-var boligaClientWait = 20 * time.Second
+var boligaClientWait = 60 * time.Second
 
 type SalesObject struct {
 	Meta  *Address `json:"meta"`
@@ -222,6 +228,16 @@ func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
 		var clientSales []BoligaSaleItem
 		remaining := tasks
 
+		// Nothing reads the channel once this returns, so a post that lands
+		// just as we give up would otherwise pin several megabytes of sales in
+		// the buffer until the session is evicted a quarter of an hour later.
+		defer func() {
+			select {
+			case <-sess.boligaIngest:
+			default:
+			}
+		}()
+
 		select {
 		case ing := <-sess.boligaIngest:
 			clientSales, remaining = acceptBoligaIngest(ing, tasks, stats)
@@ -290,8 +306,12 @@ func acceptBoligaIngest(ing *BoligaIngest, tasks []BoligaPropertyRequest, stats 
 		}
 	}
 
-	log.Printf("Boliga client fetch: browser returned %d/%d streets (%d sales); %d left for the server",
-		len(tasks)-len(remaining), len(tasks), len(sales), len(remaining))
+	// Failed is logged, never acted on: correctness comes from tasks minus
+	// fetched, so a client that omits it still gets its streets fetched. What
+	// it adds is the distinction between a street Boliga refused and one the
+	// browser never reached, which the remaining count alone cannot show.
+	log.Printf("Boliga client fetch: browser returned %d/%d streets (%d sales), reported %d refused; %d left for the server",
+		len(tasks)-len(remaining), len(tasks), len(sales), len(ing.Failed), len(remaining))
 	if unsolicited > 0 {
 		log.Printf("Boliga client fetch: discarded %d street(s) this lookup did not ask for", unsolicited)
 	}
