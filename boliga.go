@@ -37,8 +37,18 @@ var (
 )
 
 type BoligaCacher interface {
-	FetchSales([]*Address, *Progress, *HealthStats) ([][]Sale, []string, error)
+	FetchSales([]*Address, *Progress, *HealthStats, BoligaStreetFetcher) ([][]Sale, []string, error)
 }
+
+// BoligaStreetFetcher obtains the sales for a list of street queries. The
+// server has two: fetchStreetsLocally, which issues the requests itself, and
+// the session-aware one in api.go, which asks the browser to issue them and
+// falls back to the local one for whatever the browser could not get.
+//
+// Only the fetching varies. Planning the street list and matching sales back
+// to addresses are shared, so valuation behaviour cannot drift between the two
+// paths.
+type BoligaStreetFetcher func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []string, error)
 
 type boligaCacher struct {
 	db *gorm.DB
@@ -51,7 +61,7 @@ func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 
 const cacheExpiry time.Duration = time.Hour * 24 * 10 // 10 days
 
-func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *HealthStats) ([][]Sale, []string, error) {
+func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *HealthStats, fetch BoligaStreetFetcher) ([][]Sale, []string, error) {
 	cachedAddrs := map[int]*Address{}
 	fetchAddrs := map[int]*Address{}
 	var salesExpired []uint
@@ -95,11 +105,16 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 			i += 1
 		}
 
-		matched, fetchWarnings, err := BoligaSalesFromAddrs(addrsToFetch, progress, stats)
+		// Only the uncached streets become fetch work. This is what keeps the
+		// 10-day shared cache worth having once fetching moves to the browser:
+		// a warm cache still hands the client an empty list.
+		tasks := BoligaStreetTasks(addrsToFetch)
+		totalSales, fetchWarnings, err := fetch(tasks, progress, stats)
 		warnings = fetchWarnings
 		if err != nil {
 			return nil, warnings, err
 		}
+		matched := matchSalesToAddrs(addrsToFetch, totalSales)
 
 		var salesToStore []Sale
 		for i, items := range matched {
@@ -228,39 +243,69 @@ type BoligaPageCrawl struct {
 // BoligaSalesFromAddrs fetches Boliga sale listings for the given addresses
 // and returns matched sales grouped by address index.
 func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthStats) ([][]BoligaSaleItem, []string, error) {
+	tasks := BoligaStreetTasks(addrs)
+
+	totalSales, warnings, err := fetchStreetsLocally(tasks, progress, stats)
+	if err != nil {
+		return nil, warnings, err
+	}
+
+	return matchSalesToAddrs(addrs, totalSales), warnings, nil
+}
+
+// BoligaStreetTasks reduces addresses to the unique street queries Boliga
+// needs. Boliga searches by street rather than by address, so a whole street of
+// addresses collapses into one request — which is why a lookup issues 5-50
+// requests rather than one per address.
+//
+// Order follows the address order rather than map iteration order, so the same
+// addresses always produce the same task list. The client-side fetch path hands
+// this list out and correlates results back against it, and a list that
+// reshuffled per call would make that correlation non-reproducible.
+func BoligaStreetTasks(addrs []*Address) []BoligaPropertyRequest {
 	type K struct {
 		Municipality string
 		Street       string
 		ZipCode      string
 	}
 
-	m := map[K]*BoligaPropertyRequest{}
+	seen := map[K]bool{}
+	var tasks []BoligaPropertyRequest
 	for _, addr := range addrs {
 		k := K{
 			Municipality: addr.MunicipalityCode,
 			Street:       addr.StreetName,
 			ZipCode:      addr.PostalCode,
 		}
-
-		if _, ok := m[k]; !ok {
-			mun, _ := strconv.Atoi(addr.MunicipalityCode)
-			zip, _ := strconv.Atoi(addr.PostalCode)
-			m[k] = &BoligaPropertyRequest{
-				StreetName:     addr.StreetName,
-				ZipCode:        zip,
-				MunicipalityID: mun,
-			}
+		if seen[k] {
+			continue
 		}
+		seen[k] = true
+
+		mun, _ := strconv.Atoi(addr.MunicipalityCode)
+		zip, _ := strconv.Atoi(addr.PostalCode)
+		tasks = append(tasks, BoligaPropertyRequest{
+			StreetName:     addr.StreetName,
+			ZipCode:        zip,
+			MunicipalityID: mun,
+		})
 	}
 
-	totalReqs := len(m)
+	return tasks
+}
+
+// fetchStreetsLocally runs the street queries from this process. A single
+// street failing is not fatal — the remaining streets still produce a usable
+// estimate — but every street failing is, since there is nothing left to value.
+func fetchStreetsLocally(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []string, error) {
+	totalReqs := len(tasks)
 	var completedReqs, failedReqs int
 	var totalSales []BoligaSaleItem
 	var warnings []string
 
 	log.Printf("Fetching sales for %d streets...", totalReqs)
 
-	for _, req := range m {
+	for _, req := range tasks {
 		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+failedReqs+1, totalReqs), completedReqs+failedReqs, totalReqs)
 		s, err := req.Fetch()
 		if err != nil {
@@ -294,6 +339,14 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 		return nil, warnings, fmt.Errorf("alle %d gade-opslag fejlede", failedReqs)
 	}
 
+	return totalSales, warnings, nil
+}
+
+// matchSalesToAddrs attributes each sale to the address it belongs to. It is
+// deliberately independent of how the sales were obtained: server-side and
+// client-side fetching both land here, so valuation behaviour has one
+// implementation rather than one per transport.
+func matchSalesToAddrs(addrs []*Address, totalSales []BoligaSaleItem) [][]BoligaSaleItem {
 	// Build lookup maps:
 	// 1. Exact address string match
 	// 2. Normalized string match (trim, lowercase, etc.) as fallback
@@ -357,7 +410,7 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 			missed, len(missedStreets), truncate(strings.Join(examples, ", "), 300))
 	}
 
-	return result, warnings, nil
+	return result
 }
 
 // classifyError returns a user-friendly Danish description of an error.
@@ -383,16 +436,37 @@ func classifyError(err error) string {
 	return "netværksfejl"
 }
 
+// BoligaIngest is what the browser posts back after fetching. Sales are
+// Boliga's own results array, verbatim — the client is a fetch relay that does
+// no interpretation, so client-fetched and server-fetched sales reach the same
+// matcher and cannot diverge.
+type BoligaIngest struct {
+	LookupID string `json:"lookup_id"`
+	// Fetched holds the streets the browser got. Failed holds the ones it
+	// tried and could not get; the server fetches those itself. A task in
+	// neither list is treated as failed, so a client that simply stops
+	// reporting still gets its streets fetched.
+	Fetched []BoligaFetchResult     `json:"fetched"`
+	Failed  []BoligaPropertyRequest `json:"failed"`
+}
+
+type BoligaFetchResult struct {
+	Task  BoligaPropertyRequest `json:"task"`
+	Sales []BoligaSaleItem      `json:"sales"`
+}
+
 type BoligaSalesResponse struct {
 	Meta  BoligaPageCrawl  `json:"meta"`
 	Sales []BoligaSaleItem `json:"results"`
 	Err   error
 }
 
+// BoligaPropertyRequest is one street query. It doubles as the wire format for
+// a client-side fetch task, hence the JSON tags.
 type BoligaPropertyRequest struct {
-	StreetName     string
-	ZipCode        int
-	MunicipalityID int
+	StreetName     string `json:"street"`
+	ZipCode        int    `json:"zipcode"`
+	MunicipalityID int    `json:"municipality"`
 }
 
 // A var, not a const, so tests can point the fetch at an httptest server —
