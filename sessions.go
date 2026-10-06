@@ -56,9 +56,47 @@ type lookupSession struct {
 	// boligaIngest carries the browser's fetched sales to the waiting lookup
 	// goroutine. Buffered so the HTTP handler can hand off and return without
 	// caring whether anyone is still listening — a POST that arrives after the
-	// lookup gave up waiting must not block the request, and the unread value
-	// is collected along with the session.
+	// lookup gave up waiting must not block the request.
+	//
+	// boligaMu guards boligaClosed and the handoff together. A session stays
+	// addressable for fifteen minutes after its lookup finishes, so without the
+	// flag a late or duplicate upload would be answered "accepted" and then
+	// held, unread, for the rest of that quarter of an hour.
+	boligaMu     sync.Mutex
+	boligaClosed bool
 	boligaIngest chan *BoligaIngest
+}
+
+// offerBoligaIngest hands the browser's sales to the waiting lookup, reporting
+// whether anyone took them.
+func (s *lookupSession) offerBoligaIngest(ing *BoligaIngest) bool {
+	s.boligaMu.Lock()
+	defer s.boligaMu.Unlock()
+
+	if s.boligaClosed {
+		return false
+	}
+	select {
+	case s.boligaIngest <- ing:
+		return true
+	default:
+		return false
+	}
+}
+
+// closeBoligaIngest stops accepting uploads and releases any that arrived but
+// were never read. Taking the same lock as offerBoligaIngest is what makes the
+// release final: no send can slip in behind the drain and be retained until the
+// session is evicted.
+func (s *lookupSession) closeBoligaIngest() {
+	s.boligaMu.Lock()
+	defer s.boligaMu.Unlock()
+
+	s.boligaClosed = true
+	select {
+	case <-s.boligaIngest:
+	default:
+	}
 }
 
 type sessionStore struct {

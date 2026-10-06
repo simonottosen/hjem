@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -384,4 +385,142 @@ func TestServerBoligaQueryShape(t *testing.T) {
 			t.Errorf("query %s=%q, want %q (frontend/src/lib/boliga.ts must match)", k, got.Get(k), v)
 		}
 	}
+}
+
+// deadBoliga stands in for a Boliga that refuses everything. 403 is the one
+// failure the transport does not retry, so the server-side remainder fails
+// immediately instead of walking the 2s..32s backoff ladder.
+func deadBoliga(t *testing.T) {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	orig := boligaSoldSearchURL
+	boligaSoldSearchURL = srv.URL
+	t.Cleanup(func() { boligaSoldSearchURL = orig })
+}
+
+// A street with no sales is a successful fetch, not a missing one. Judging the
+// browser's contribution by the number of sales it returned rather than the
+// number of streets it covered turns an empty street into "the browser gave us
+// nothing", and fails the whole lookup when the server's remainder also fails.
+func TestEmptyStreetCountsAsFetched(t *testing.T) {
+	deadBoliga(t)
+	s := testServer(t)
+	sess, err := s.sessions.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tasks := []BoligaPropertyRequest{task("Tomgade", 1456), task("Nørregade", 1165)}
+	// The browser covered the first street and found it genuinely empty; the
+	// second is left to the server, which cannot reach Boliga at all.
+	sess.boligaIngest <- &BoligaIngest{
+		LookupID: sess.ID,
+		Fetched:  []BoligaFetchResult{{Task: tasks[0], Sales: nil}},
+	}
+
+	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	if err != nil {
+		t.Fatalf("lookup failed even though the browser covered a street: %v", err)
+	}
+	if len(sales) != 0 {
+		t.Errorf("got %d sales, want 0", len(sales))
+	}
+}
+
+// A session stays addressable for fifteen minutes after its lookup ends. An
+// upload arriving in that window must be refused rather than buffered: nothing
+// will ever read it, and it holds its decoded sales until eviction.
+func TestIngestRefusedAfterRelayCloses(t *testing.T) {
+	_, _ = fakeBoliga(t)
+	orig := boligaClientWait
+	boligaClientWait = 10 * time.Millisecond
+	t.Cleanup(func() { boligaClientWait = orig })
+
+	s := testServer(t)
+	sess, err := s.sessions.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Let the relay time out and stop listening.
+	s.clientStreetFetcher(sess)([]BoligaPropertyRequest{task("Vestergade", 1456)}, sess.Progress, s.stats)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/boliga/ingest",
+		bytes.NewBufferString(fmt.Sprintf(`{"lookup_id":%q,"fetched":[]}`, sess.ID)))
+	rec := httptest.NewRecorder()
+	s.handleBoligaIngest()(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status %d, want 200 (ignored) — a closed relay must not answer 202", rec.Code)
+	}
+	if n := len(sess.boligaIngest); n != 0 {
+		t.Errorf("%d ingest(s) retained after the relay closed, want 0", n)
+	}
+}
+
+// bloatedIngest is the cheapest body that decodes into the most memory: a
+// BoligaSaleItem is 184 bytes and `{},` is three.
+func bloatedIngest(lookupID string, sales int) string {
+	elems := strings.Repeat("{},", sales)
+	return fmt.Sprintf(`{"lookup_id":%q,"fetched":[{"task":{},"sales":[%s]}]}`,
+		lookupID, elems[:len(elems)-1])
+}
+
+// The byte limit bounds the request, not what it decodes into — measured at
+// 16mb in, 3.5gb of live heap out. Both halves of the fix are checked here: the
+// cap itself, and that an unrecognised lookup id is turned away before any of
+// the payload is expanded.
+func TestIngestBoundsDecodedSize(t *testing.T) {
+	s := testServer(t)
+	sess, err := s.sessions.Create("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/boliga/ingest", bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		s.handleBoligaIngest()(rec, req)
+		return rec
+	}
+
+	t.Run("over the sale cap", func(t *testing.T) {
+		if rec := post(bloatedIngest(sess.ID, maxBoligaIngestSales+1)); rec.Code != http.StatusBadRequest {
+			t.Errorf("status %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("a real lookup still fits", func(t *testing.T) {
+		// The densest search observed returned 2229 sales.
+		if rec := post(bloatedIngest(sess.ID, 2229)); rec.Code != http.StatusAccepted {
+			t.Errorf("status %d, want 202 — the cap must not reject real lookups", rec.Code)
+		}
+	})
+
+	t.Run("unknown lookup id expands nothing", func(t *testing.T) {
+		body := bloatedIngest("deadbeef", 500_000)
+
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		rec := post(body)
+		runtime.ReadMemStats(&after)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404", rec.Code)
+		}
+		// Decoding first would allocate 500k * 184 bytes = 92mb. Holding the
+		// array as raw bytes costs what it weighs, about 1.5mb.
+		grew := after.TotalAlloc - before.TotalAlloc
+		if limit := uint64(20 << 20); grew > limit {
+			t.Errorf("allocated %.1fmb rejecting an unknown lookup id, want under %.0fmb — "+
+				"the payload is being decoded before the session is checked",
+				float64(grew)/(1<<20), float64(limit)/(1<<20))
+		}
+	})
 }
