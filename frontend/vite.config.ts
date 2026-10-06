@@ -17,9 +17,13 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: "app.bundle.js",
-        chunkFileNames: "app.bundle.js",
+        // Hashless, because the server embeds whatever is in dist and the
+        // entry point is served no-cache — a hashed chunk name would survive
+        // a deploy in nobody's cache but still bloat the embedded binary with
+        // every past build. Unhashed chunks need the entry's no-cache too,
+        // which Routes() in api.go gives the whole /dist/ tree.
+        chunkFileNames: "[name].bundle.js",
         assetFileNames: "assets/[name].[ext]",
-        manualChunks: undefined,
       },
     },
   },

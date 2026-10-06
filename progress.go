@@ -35,6 +35,12 @@ type ProgressEvent struct {
 	// and has no use for the list once it has started, so repeating it on every
 	// later poll would be pure payload.
 	BoligaTasks []BoligaPropertyRequest `json:"boliga_tasks,omitempty"`
+
+	// Map is the loading visualization's data. Sent on the first few Boliga-stage
+	// snapshots only — see mapPlanSends. Unlike BoligaTasks this cannot be gated
+	// on the stage alone: StageBoligaList is re-set on every server-side street
+	// fetch, so it spans most of a long lookup.
+	Map *MapPlan `json:"map,omitempty"`
 }
 
 type Progress struct {
@@ -48,6 +54,8 @@ type Progress struct {
 	result      interface{}
 	warnings    []string
 	boligaTasks []BoligaPropertyRequest
+	mapPlan     *MapPlan
+	mapPlanLeft int
 	notify      chan struct{}
 
 	// now exists so the session store can hold this progress to the same clock
@@ -109,6 +117,24 @@ func (p *Progress) SetBoligaTasks(tasks []BoligaPropertyRequest) {
 	p.mu.Unlock()
 }
 
+// mapPlanSends is how many snapshots carry the map plan before it stops being
+// sent. The client keeps the first copy it sees, so one would do; the spares
+// are there so a single dropped poll does not cost the whole map. A plan is a
+// few thousand coordinates — tens of kilobytes — and a long lookup is polled a
+// hundred times, so sending it on every one of them would be megabytes of
+// identical payload the client throws away.
+const mapPlanSends = 3
+
+// SetMapPlan records the loading visualization's data. Call it before
+// advancing past StageDawa: the plan only ships on the Boliga stages, so one
+// set afterwards would never be seen.
+func (p *Progress) SetMapPlan(plan *MapPlan) {
+	p.mu.Lock()
+	p.mapPlan = plan
+	p.mapPlanLeft = mapPlanSends
+	p.mu.Unlock()
+}
+
 func (p *Progress) SetResult(result interface{}) {
 	p.mu.Lock()
 	p.result = result
@@ -155,6 +181,10 @@ func (p *Progress) Snapshot() ProgressEvent {
 	}
 	if p.stage == StageBoligaClient {
 		evt.BoligaTasks = p.boligaTasks
+	}
+	if p.mapPlanLeft > 0 && (p.stage == StageBoligaList || p.stage == StageBoligaClient) {
+		p.mapPlanLeft--
+		evt.Map = p.mapPlan
 	}
 	return evt
 }

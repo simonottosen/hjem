@@ -108,6 +108,34 @@ export interface BoligaRelayOutcome {
   failed: BoligaTask[];
 }
 
+// The buildings one street query covers, as [lat, lon] pairs. Mirrors
+// MapStreet in mapplan.go; the task is keyed identically to a BoligaTask so a
+// completed fetch can reveal exactly the buildings it accounted for.
+export interface MapStreet {
+  task: BoligaTask;
+  points: [number, number][];
+}
+
+// Everything the loading map draws. Mirrors MapPlan in mapplan.go.
+export interface MapPlan {
+  lat: number;
+  lon: number;
+  radius_m: number;
+  streets: MapStreet[];
+}
+
+// A plan plus how much of it has been earned so far, keyed by streetKey(). The
+// three states are kept apart deliberately: a street we fetched, a street
+// Boliga refused us, and a street nobody has reached yet must not look alike.
+export interface MapProgress {
+  plan: MapPlan;
+  done: Set<string>;
+  failed: Set<string>;
+  // The lookup has finished, so whatever the browser never reached was covered
+  // by the server and can stop being drawn as pending.
+  settled: boolean;
+}
+
 export interface ProgressEvent {
   stage: ProgressStage;
   message: string;
@@ -119,4 +147,7 @@ export interface ProgressEvent {
   // Present only while the stage is "boliga_client", so a poll that arrives
   // after the server stopped waiting cannot restart a relay.
   boliga_tasks?: BoligaTask[];
+  // Present only on the two stages between the addresses being known and the
+  // fetching starting. The client keeps the first copy it sees.
+  map?: MapPlan;
 }

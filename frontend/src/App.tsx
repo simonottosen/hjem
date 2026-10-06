@@ -5,6 +5,7 @@ import { useProgress } from "@/hooks/useProgress";
 import { useFilteredData } from "@/hooks/useFilteredData";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressBar } from "@/components/ProgressBar";
+import { ProgressMap } from "@/components/ProgressMap";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { DashboardLayout } from "@/components/DashboardLayout";
 
@@ -29,7 +30,7 @@ function Footer() {
 
 export default function App() {
   const { data, isLoading, error, search, setResult, setSearchError } = useSearch();
-  const { progress, startPolling, reset } = useProgress();
+  const { progress, map, startPolling, reset } = useProgress();
 
   // Form state lifted here so it survives layout changes
   const [query, setQuery] = useState("");
@@ -121,7 +122,15 @@ export default function App() {
           </div>
         </div>
 
-        {isLoading && <ProgressBar progress={progress} />}
+        {isLoading && (
+          // The map sits above the bar rather than behind it: its attribution
+          // control lives in its own bottom-right corner and would land on top
+          // of the ETA.
+          <div className="space-y-2">
+            <ProgressMap map={map} />
+            <ProgressBar progress={progress} />
+          </div>
+        )}
 
         {!isLoading && error && <ErrorAlert error={error} />}
 

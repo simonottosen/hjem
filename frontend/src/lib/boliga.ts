@@ -12,6 +12,14 @@ import type { BoligaTask, BoligaFetchResult, BoligaRelayOutcome } from "./types"
 
 const BOLIGA_URL = "https://api.boliga.dk/api/v2/sold/search/results";
 
+// streetKey identifies a street across the two places that name one: the task
+// list the server hands out, and the map plan's per-street buildings. The Go
+// side keys both on the same three fields, so this has to use all three — two
+// municipalities can share a street name, and a street can span postcodes.
+export function streetKey(t: BoligaTask): string {
+  return `${t.street}|${t.zipcode}|${t.municipality}`;
+}
+
 // Measured against api.boliga.dk: twelve back-to-back requests return 429 from
 // about the seventh, while the same twelve spaced a second apart all return
 // 200. Boliga serves a small burst and then throttles to roughly one request
@@ -177,12 +185,19 @@ async function fetchStreet(
   }
 }
 
+// onStreet reports each street the moment it settles, which is what drives the
+// loading map. The outcome below only arrives once the whole run is over, far
+// too late to animate anything. Streets that were never attempted are never
+// reported, so "pending" stays distinguishable from "failed".
+export type StreetSettled = (task: BoligaTask, ok: boolean) => void;
+
 // runBoligaTasks fetches every street it can within the budget and leaves the
 // rest to the server. It never throws and never hangs: a lookup must still
 // complete when the browser can contribute nothing.
 export async function runBoligaTasks(
   tasks: BoligaTask[],
-  cancel?: AbortSignal
+  cancel?: AbortSignal,
+  onStreet?: StreetSettled
 ): Promise<BoligaRelayOutcome> {
   if (tasks.length === 0) {
     return { fetched: [], failed: [] };
@@ -209,6 +224,7 @@ export async function runBoligaTasks(
     const [probe, ...rest] = tasks;
     try {
       fetched.push({ task: probe, sales: await fetchStreet(probe, pace, signal) });
+      onStreet?.(probe, true);
     } catch (err) {
       if (signal.aborted) {
         return { fetched: [], failed: [] };
@@ -219,6 +235,7 @@ export async function runBoligaTasks(
       }
       console.warn("[hjem] Boliga street failed, server will refetch:", err);
       failed.push(probe);
+      onStreet?.(probe, false);
     }
 
     let next = 0;
@@ -230,6 +247,7 @@ export async function runBoligaTasks(
         const task = rest[i];
         try {
           fetched.push({ task, sales: await fetchStreet(task, pace, signal) });
+          onStreet?.(task, true);
         } catch (err) {
           // Streets left unattempted are reported by saying nothing about
           // them, so an aborted one must not be recorded as refused.
@@ -240,6 +258,7 @@ export async function runBoligaTasks(
           // blocked outright, and the message says which.
           console.warn("[hjem] Boliga street failed, server will refetch:", err);
           failed.push(task);
+          onStreet?.(task, false);
         }
       }
     };
