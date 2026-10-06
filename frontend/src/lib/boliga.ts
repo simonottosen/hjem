@@ -12,6 +12,14 @@ import type { BoligaTask, BoligaFetchResult, BoligaRelayOutcome } from "./types"
 
 const BOLIGA_URL = "https://api.boliga.dk/api/v2/sold/search/results";
 
+// streetKey identifies a street across the two places that name one: the task
+// list the server hands out, and the map plan's per-street buildings. The Go
+// side keys both on the same three fields, so this has to use all three — two
+// municipalities can share a street name, and a street can span postcodes.
+export function streetKey(t: BoligaTask): string {
+  return `${t.street}|${t.zipcode}|${t.municipality}`;
+}
+
 // Measured against api.boliga.dk: twelve back-to-back requests return 429 from
 // about the seventh, while the same twelve spaced a second apart all return
 // 200. Boliga serves a small burst and then throttles to roughly one request
@@ -177,12 +185,19 @@ async function fetchStreet(
   }
 }
 
+// onStreet reports each street the moment it settles, which is what drives the
+// loading map. The outcome below only arrives once the whole run is over, far
+// too late to animate anything. Streets that were never attempted are never
+// reported, so "pending" stays distinguishable from "failed".
+export type StreetSettled = (task: BoligaTask, ok: boolean) => void;
+
 // runBoligaTasks fetches every street it can within the budget and leaves the
 // rest to the server. It never throws and never hangs: a lookup must still
 // complete when the browser can contribute nothing.
 export async function runBoligaTasks(
   tasks: BoligaTask[],
-  cancel?: AbortSignal
+  cancel?: AbortSignal,
+  onStreet?: StreetSettled
 ): Promise<BoligaRelayOutcome> {
   if (tasks.length === 0) {
     return { fetched: [], failed: [] };
@@ -201,14 +216,31 @@ export async function runBoligaTasks(
   const fetched: BoligaFetchResult[] = [];
   const failed: BoligaTask[] = [];
 
+  // Reporting is decoration and is held to this function's "never throws"
+  // contract. Unguarded, a throw from the map would reject the relay, and the
+  // caller only logs that — so the ingest would never be posted, and the
+  // server would wait out the client timeout before refetching streets the
+  // browser already had in hand.
+  const report = (task: BoligaTask, ok: boolean) => {
+    try {
+      onStreet?.(task, ok);
+    } catch (err) {
+      console.warn("[hjem] Progress map:", err);
+    }
+  };
+
   try {
     // Probe with one task before committing to the rest. A systemic failure
     // fails all of them identically, so discovering it on task 1 and handing
     // the whole list back beats making the user's browser attempt 50 doomed
     // requests.
     const [probe, ...rest] = tasks;
+    // Reported after the catch, never inside it, so that the arm classifying a
+    // fetch as refused only ever sees failures from the fetch itself.
+    let probeOk = false;
     try {
       fetched.push({ task: probe, sales: await fetchStreet(probe, pace, signal) });
+      probeOk = true;
     } catch (err) {
       if (signal.aborted) {
         return { fetched: [], failed: [] };
@@ -220,6 +252,7 @@ export async function runBoligaTasks(
       console.warn("[hjem] Boliga street failed, server will refetch:", err);
       failed.push(probe);
     }
+    report(probe, probeOk);
 
     let next = 0;
     const worker = async () => {
@@ -228,8 +261,10 @@ export async function runBoligaTasks(
         if (i >= rest.length) return;
 
         const task = rest[i];
+        let ok = false;
         try {
           fetched.push({ task, sales: await fetchStreet(task, pace, signal) });
+          ok = true;
         } catch (err) {
           // Streets left unattempted are reported by saying nothing about
           // them, so an aborted one must not be recorded as refused.
@@ -241,6 +276,7 @@ export async function runBoligaTasks(
           console.warn("[hjem] Boliga street failed, server will refetch:", err);
           failed.push(task);
         }
+        report(task, ok);
       }
     };
 

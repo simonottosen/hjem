@@ -2,15 +2,17 @@ package hjem
 
 import (
 	"bytes"
-	_ "embed"
+	"embed"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -174,6 +176,11 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	for _, addrsInRange := range rangeMap {
 		addrs = append(addrs, addrsInRange...)
 	}
+
+	// Before the stage change, not after: the plan only ships on the Boliga
+	// stages, and a client polling in between would start the visualization
+	// with nothing to draw and never ask again.
+	p.SetMapPlan(buildMapPlan(addr, addrs, ranges))
 
 	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
 	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess))
@@ -557,21 +564,40 @@ func (s *server) handleIndex() http.HandlerFunc {
 	}
 }
 
-//go:embed frontend/dist/app.bundle.js
-var bundleBytes []byte
+// The whole build output, not just the entry point: the map is loaded from a
+// chunk of its own so that maplibre-gl is downloaded by the people who start a
+// lookup rather than by everyone who opens the page.
+//
+//go:embed frontend/dist
+var distFS embed.FS
 
-func (s *server) handleBundle() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		w.Write(bundleBytes)
+func (s *server) handleDist() http.Handler {
+	// The embed path is a compile-time constant, so this cannot fail for any
+	// reason a running server could do something about.
+	root, err := fs.Sub(distFS, "frontend/dist")
+	if err != nil {
+		panic(err)
 	}
+	files := http.FileServer(http.FS(root))
+
+	return http.StripPrefix("/dist/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// http.FileServer answers a directory with an index listing, which here
+		// would publish the whole build output.
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		// Chunk names carry no content hash, so a cached copy from a previous
+		// deploy is a wrong copy under a right name.
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		files.ServeHTTP(w, r)
+	}))
 }
 
 func (s *server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex())
-	mux.HandleFunc("/dist/app.bundle.js", s.handleBundle())
+	mux.Handle("/dist/", s.handleDist())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
 	mux.HandleFunc("/api/progress", s.handleProgress())
 	mux.HandleFunc("/api/boliga/ingest", s.handleBoligaIngest())
