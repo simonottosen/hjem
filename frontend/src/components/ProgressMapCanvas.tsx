@@ -88,28 +88,39 @@ export function ProgressMapCanvas({ map }: ProgressMapProps) {
 
   // Only the sources named actually get rewritten: setData re-indexes the whole
   // collection, and the settled bucket grows to every point in the plan.
+  //
+  // Nothing is allowed out of here. This is called from an effect, in a tree
+  // with no error boundary, so an exception escaping would unmount the
+  // dashboard the user waited minutes for. maplibre is third-party code driven
+  // by live network and GPU state; the map is decoration and stops updating
+  // rather than taking the results down with it.
   function draw(m: MapLibreMap, ...changed: string[]) {
-    const points: Record<string, Points> = {
-      [SETTLED]: settledRef.current,
-      [ENTERING]: enteringRef.current,
-      [MISSED]: missedRef.current,
-    };
-    for (const id of changed) {
-      (m.getSource(id) as GeoJSONSource | undefined)?.setData(
-        pointCollection(points[id])
-      );
+    try {
+      const points: Record<string, Points> = {
+        [SETTLED]: settledRef.current,
+        [ENTERING]: enteringRef.current,
+        [MISSED]: missedRef.current,
+      };
+      for (const id of changed) {
+        (m.getSource(id) as GeoJSONSource | undefined)?.setData(
+          pointCollection(points[id])
+        );
+      }
+
+      if (!changed.includes(ENTERING) || !enteringRef.current.length) return;
+      if (reduceMotion) return;
+
+      // Paint transitions do not fire for features that are merely added, so
+      // the entrance is animated on the layer instead: snap the whole entering
+      // batch to its start values, then transition the layer to the resting
+      // ones.
+      setEnterPaint(m, 0, ENTER_RADIUS, 0);
+      requestAnimationFrame(() => {
+        if (mapRef.current === m) setEnterPaint(m, ENTER_MS, DOT_RADIUS, DOT_OPACITY);
+      });
+    } catch (err) {
+      console.warn("[hjem] Progress map:", err);
     }
-
-    if (!changed.includes(ENTERING) || !enteringRef.current.length) return;
-    if (reduceMotion) return;
-
-    // Paint transitions do not fire for features that are merely added, so the
-    // entrance is animated on the layer instead: snap the whole entering batch
-    // to its start values, then transition the layer to the resting ones.
-    setEnterPaint(m, 0, ENTER_RADIUS, 0);
-    requestAnimationFrame(() => {
-      if (mapRef.current === m) setEnterPaint(m, ENTER_MS, DOT_RADIUS, DOT_OPACITY);
-    });
   }
 
   useEffect(() => {

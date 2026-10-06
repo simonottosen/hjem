@@ -222,9 +222,14 @@ export async function runBoligaTasks(
     // the whole list back beats making the user's browser attempt 50 doomed
     // requests.
     const [probe, ...rest] = tasks;
+    // Reported after the catch, never inside it. The reveal is decoration, and
+    // a decoration that throws from in here would be caught by the arm that
+    // classifies a fetch as refused — turning a map bug into a street this
+    // function swears Boliga rejected.
+    let probeOk = false;
     try {
       fetched.push({ task: probe, sales: await fetchStreet(probe, pace, signal) });
-      onStreet?.(probe, true);
+      probeOk = true;
     } catch (err) {
       if (signal.aborted) {
         return { fetched: [], failed: [] };
@@ -235,8 +240,8 @@ export async function runBoligaTasks(
       }
       console.warn("[hjem] Boliga street failed, server will refetch:", err);
       failed.push(probe);
-      onStreet?.(probe, false);
     }
+    onStreet?.(probe, probeOk);
 
     let next = 0;
     const worker = async () => {
@@ -245,9 +250,10 @@ export async function runBoligaTasks(
         if (i >= rest.length) return;
 
         const task = rest[i];
+        let ok = false;
         try {
           fetched.push({ task, sales: await fetchStreet(task, pace, signal) });
-          onStreet?.(task, true);
+          ok = true;
         } catch (err) {
           // Streets left unattempted are reported by saying nothing about
           // them, so an aborted one must not be recorded as refused.
@@ -258,8 +264,8 @@ export async function runBoligaTasks(
           // blocked outright, and the message says which.
           console.warn("[hjem] Boliga street failed, server will refetch:", err);
           failed.push(task);
-          onStreet?.(task, false);
         }
+        onStreet?.(task, ok);
       }
     };
 
