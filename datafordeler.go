@@ -521,8 +521,8 @@ func gqlIDList(ids []string) string {
 	return strings.Join(parts, ", ")
 }
 
-func keysOf[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
+func keysOf[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
@@ -530,8 +530,8 @@ func keysOf[V any](m map[string]V) []string {
 }
 
 // chunk splits s into consecutive slices of at most size elements.
-func chunk(s []string, size int) [][]string {
-	var out [][]string
+func chunk[T any](s []T, size int) [][]T {
+	var out [][]T
 	for i := 0; i < len(s); i += size {
 		end := i + size
 		if end > len(s) {

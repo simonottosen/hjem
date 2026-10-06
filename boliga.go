@@ -281,7 +281,11 @@ func summarizeFetch(cached int, fetchAddrs []*Address, streetCount int, failures
 }
 
 type Sale struct {
-	AddrID    uint      `json:"-"`
+	// Every query against this table filters on addr_id — reading a cached
+	// address's sales, expiring them, and re-pointing them when duplicate
+	// address rows are collapsed — and without an index each of those is a
+	// full scan.
+	AddrID    uint      `json:"-" gorm:"index"`
 	AmountDKK int       `json:"amount"`
 	SqMeters  int       `json:"sq_meters"`
 	Rooms     int       `json:"rooms"`

@@ -2,6 +2,7 @@ package hjem
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -379,42 +380,206 @@ func TestAddressMigrationToleratesPreUUIDRows(t *testing.T) {
 	}
 }
 
-// TestNewDawaCacherBootsWithDuplicateDawaUUID covers the databases that already
-// carry the duplicates this fix prevents: the index cannot be created there, so
-// the server has to come up without it rather than die in AutoMigrate.
-func TestNewDawaCacherBootsWithDuplicateDawaUUID(t *testing.T) {
+const dupUUID = "70865c44-d570-44e7-a6f5-6f7c90add725"
+
+// duplicatedDB returns a database in the state production was left in: the
+// unique index absent, and several address rows for one DAR address because the
+// dedupe used to key on the formatted DawaID. The sales table is migrated here
+// rather than by the caller because on a real upgrade it was created by an
+// earlier deployment, long before this boot.
+//
+// Three copies rather than two, because nothing restricted the old keying to
+// producing pairs — one per spelling the sources ever disagreed on.
+func duplicatedDB(t *testing.T) (*gorm.DB, []*Address) {
+	t.Helper()
+
 	db := newTestDB(t)
 	NewDawaCacher(db)
+	NewBoligaCacher(db)
 	if err := db.Migrator().DropIndex(&Address{}, addrUniqueIndex); err != nil {
 		t.Fatalf("drop index to simulate the old schema: %v", err)
 	}
 
-	const uuid = "70865c44-d570-44e7-a6f5-6f7c90add725"
 	dupes := []*Address{
-		{DawaUUID: uuid, DawaID: "Testvej 1, 1. tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
-		{DawaUUID: uuid, DawaID: "Testvej 1, 1 tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+		{DawaUUID: dupUUID, DawaID: "Testvej 1, 1. tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+		{DawaUUID: dupUUID, DawaID: "Testvej 1, 1 tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+		{DawaUUID: dupUUID, DawaID: "Testvej 1, 1.tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
 	}
 	if err := db.Create(&dupes).Error; err != nil {
 		t.Fatalf("seed duplicates: %v", err)
 	}
 
-	c := NewDawaCacher(db)
-	if db.Migrator().HasIndex(&Address{}, addrUniqueIndex) {
-		t.Fatal("unique index was created over duplicate rows")
+	return db, dupes
+}
+
+func countSales(t *testing.T, db *gorm.DB, addrID uint) int64 {
+	t.Helper()
+	var n int64
+	if err := db.Model(&Sale{}).Where("addr_id = ?", addrID).Count(&n).Error; err != nil {
+		t.Fatalf("count sales: %v", err)
+	}
+	return n
+}
+
+// TestNewDawaCacherCollapsesDuplicateDawaUUID covers the databases that already
+// carry the duplicates #21 stopped being created. Until they are merged the
+// unique index cannot exist, so nothing stops the next one; and the copy no
+// lookup resolves to keeps paying for a Boliga fetch nobody reads.
+func TestNewDawaCacherCollapsesDuplicateDawaUUID(t *testing.T) {
+	db, dupes := duplicatedDB(t)
+	survivor, donor := dupes[0], dupes[1]
+
+	// Only a discarded copy has a warm Boliga cache, which is the case worth
+	// protecting: dropping it would make the survivor refetch a street that
+	// was already paid for.
+	collected := time.Now().Add(-time.Hour)
+	donor.BoligaCollectedAt = collected
+	donor.BoligaBuiltYear = 1932
+	donor.BoligaRooms = 4
+	if err := db.Save(donor).Error; err != nil {
+		t.Fatalf("warm the duplicate: %v", err)
+	}
+	if err := db.Create(&[]Sale{
+		{AddrID: donor.ID, AmountDKK: 4_200_000, SqMeters: 90, Rooms: 4, BuildYear: 1932, Date: time.Now().Add(-30 * 24 * time.Hour)},
+		{AddrID: donor.ID, AmountDKK: 3_100_000, SqMeters: 90, Rooms: 4, BuildYear: 1932, Date: time.Now().Add(-900 * 24 * time.Hour)},
+	}).Error; err != nil {
+		t.Fatalf("seed sales: %v", err)
 	}
 
-	// The duplicates stay, but every lookup resolves to the oldest copy instead
-	// of flapping between them.
-	for i := 0; i < 3; i++ {
-		got := []*Address{{DawaUUID: uuid, DawaID: "Testvej 1, 1.tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"}}
-		if err := c.safeCreateOrGetAddrs(got); err != nil {
-			t.Fatalf("resolve on a duplicated database: %v", err)
-		}
-		if got[0].ID != dupes[0].ID {
-			t.Fatalf("resolved to row %d, want the oldest copy %d", got[0].ID, dupes[0].ID)
-		}
+	// A cached radius result naming every copy, plus an unrelated address.
+	const query = "https://example.invalid/dar/naboer?x=1&y=2"
+	const untouched = "https://example.invalid/dar/naboer?x=9&y=9"
+	other := &Address{DawaUUID: "other-uuid", DawaID: "Andenvej 5, 8000 Aarhus C", StreetName: "Andenvej", StreetNumber: "5", PostalCode: "8000", MunicipalityCode: "0751"}
+	if err := db.Create(other).Error; err != nil {
+		t.Fatalf("seed unrelated address: %v", err)
+	}
+	cachedIDs := fmt.Sprintf("%d,%d,%d,%d", survivor.ID, donor.ID, dupes[2].ID, other.ID)
+	otherIDs := fmt.Sprintf("%d", other.ID)
+	if err := db.Create(&[]DawaQueryCache{
+		{Query: query, IDs: cachedIDs, CreatedAt: time.Now()},
+		{Query: untouched, IDs: otherIDs, CreatedAt: time.Now()},
+	}).Error; err != nil {
+		t.Fatalf("seed query cache: %v", err)
+	}
+
+	c := NewDawaCacher(db)
+
+	if !db.Migrator().HasIndex(&Address{}, addrUniqueIndex) {
+		t.Error("unique index still missing after the duplicates were collapsed")
 	}
 	if n := countAddrs(t, db); n != 2 {
-		t.Fatalf("%d address rows, want the 2 seeded duplicates and nothing new", n)
+		t.Fatalf("%d address rows, want 2 — the three copies collapsed to one, plus the unrelated address", n)
+	}
+
+	var kept Address
+	if err := db.First(&kept, survivor.ID).Error; err != nil {
+		t.Fatalf("the oldest copy was not the one kept: %v", err)
+	}
+	if !kept.BoligaCollectedAt.Equal(collected) || kept.BoligaBuiltYear != 1932 || kept.BoligaRooms != 4 {
+		t.Errorf("surviving row did not adopt the duplicate's Boliga data: %+v", kept)
+	}
+	if n := countSales(t, db, survivor.ID); n != 2 {
+		t.Errorf("%d sales on the surviving row, want the duplicate's 2", n)
+	}
+	if n := countSales(t, db, donor.ID); n != 0 {
+		t.Errorf("%d sales still point at the removed row %d", n, donor.ID)
+	}
+
+	// The cache holds row ids for a year, and a read loads them with Find,
+	// which drops ids that no longer exist without saying so. Left alone, this
+	// entry would have returned two addresses instead of four.
+	var cache DawaQueryCache
+	if err := db.First(&cache, "query = ?", query).Error; err != nil {
+		t.Fatalf("reload query cache: %v", err)
+	}
+	if want := fmt.Sprintf("%d,%d", survivor.ID, other.ID); cache.IDs != want {
+		t.Errorf("cached ids are %q, want %q", cache.IDs, want)
+	}
+
+	// An entry naming none of the removed rows is left exactly as it was.
+	var unaffected DawaQueryCache
+	if err := db.First(&unaffected, "query = ?", untouched).Error; err != nil {
+		t.Fatalf("reload the unaffected query cache: %v", err)
+	}
+	if unaffected.IDs != otherIDs {
+		t.Errorf("unaffected entry was rewritten to %q, want %q", unaffected.IDs, otherIDs)
+	}
+
+	// And the drifted spelling that created the duplicate now resolves to the
+	// row that survived, rather than inserting a third.
+	got := []*Address{{DawaUUID: dupUUID, DawaID: "Testvej 1, 1.tv, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"}}
+	if err := c.safeCreateOrGetAddrs(got); err != nil {
+		t.Fatalf("resolve after the collapse: %v", err)
+	}
+	if got[0].ID != survivor.ID {
+		t.Errorf("resolved to row %d, want the surviving row %d", got[0].ID, survivor.ID)
+	}
+}
+
+// TestCollapseDoesNotMergeTwoWarmCaches pins the limit on how much cache the
+// collapse may keep. The copies hold the same street's sales, so re-pointing a
+// discarded one's would list every sale under the address twice and weight it
+// double in the comps.
+func TestCollapseDoesNotMergeTwoWarmCaches(t *testing.T) {
+	db, dupes := duplicatedDB(t)
+	survivor := dupes[0]
+
+	sale := Sale{AmountDKK: 4_200_000, SqMeters: 90, Rooms: 4, BuildYear: 1932, Date: time.Now().Add(-30 * 24 * time.Hour)}
+	var sales []Sale
+	for _, a := range dupes {
+		a.BoligaCollectedAt = time.Now().Add(-time.Hour)
+		if err := db.Save(a).Error; err != nil {
+			t.Fatalf("warm %d: %v", a.ID, err)
+		}
+		s := sale
+		s.AddrID = a.ID
+		sales = append(sales, s)
+	}
+	if err := db.Create(&sales).Error; err != nil {
+		t.Fatalf("seed sales: %v", err)
+	}
+
+	if kept, removed, err := collapseDuplicateUUIDs(db); err != nil || kept != 1 || removed != 2 {
+		t.Fatalf("collapse returned (%d, %d, %v), want (1, 2, nil)", kept, removed, err)
+	}
+
+	if n := countSales(t, db, survivor.ID); n != 1 {
+		t.Errorf("%d sales on the surviving row, want 1 — the duplicate's copy must be dropped, not added", n)
+	}
+	var total int64
+	if err := db.Model(&Sale{}).Count(&total).Error; err != nil {
+		t.Fatalf("count sales: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("%d sales left in the database, want 1", total)
+	}
+}
+
+// TestCollapseLeavesPreUUIDRowsAlone guards the blank key. Rows written before
+// DawaUUID was populated all share the empty string, so a collapse that did not
+// exclude them would fold every legacy address in the database into one.
+func TestCollapseLeavesPreUUIDRowsAlone(t *testing.T) {
+	db := newTestDB(t)
+	NewDawaCacher(db)
+	NewBoligaCacher(db)
+
+	legacy := []*Address{
+		{DawaID: "Gammelvej 2, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "2", PostalCode: "5000", MunicipalityCode: "0461"},
+		{DawaID: "Gammelvej 4, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "4", PostalCode: "5000", MunicipalityCode: "0461"},
+		{DawaID: "Gammelvej 6, 5000 Odense C", StreetName: "Gammelvej", StreetNumber: "6", PostalCode: "5000", MunicipalityCode: "0461"},
+	}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatalf("seed pre-UUID rows: %v", err)
+	}
+
+	kept, removed, err := collapseDuplicateUUIDs(db)
+	if err != nil {
+		t.Fatalf("collapse: %v", err)
+	}
+	if kept != 0 || removed != 0 {
+		t.Fatalf("collapse touched %d group(s) and removed %d row(s), want none", kept, removed)
+	}
+	if n := countAddrs(t, db); n != 3 {
+		t.Fatalf("%d address rows, want the 3 seeded", n)
 	}
 }
