@@ -216,16 +216,27 @@ export async function runBoligaTasks(
   const fetched: BoligaFetchResult[] = [];
   const failed: BoligaTask[] = [];
 
+  // Reporting is decoration and is held to this function's "never throws"
+  // contract. Unguarded, a throw from the map would reject the relay, and the
+  // caller only logs that — so the ingest would never be posted, and the
+  // server would wait out the client timeout before refetching streets the
+  // browser already had in hand.
+  const report = (task: BoligaTask, ok: boolean) => {
+    try {
+      onStreet?.(task, ok);
+    } catch (err) {
+      console.warn("[hjem] Progress map:", err);
+    }
+  };
+
   try {
     // Probe with one task before committing to the rest. A systemic failure
     // fails all of them identically, so discovering it on task 1 and handing
     // the whole list back beats making the user's browser attempt 50 doomed
     // requests.
     const [probe, ...rest] = tasks;
-    // Reported after the catch, never inside it. The reveal is decoration, and
-    // a decoration that throws from in here would be caught by the arm that
-    // classifies a fetch as refused — turning a map bug into a street this
-    // function swears Boliga rejected.
+    // Reported after the catch, never inside it, so that the arm classifying a
+    // fetch as refused only ever sees failures from the fetch itself.
     let probeOk = false;
     try {
       fetched.push({ task: probe, sales: await fetchStreet(probe, pace, signal) });
@@ -241,7 +252,7 @@ export async function runBoligaTasks(
       console.warn("[hjem] Boliga street failed, server will refetch:", err);
       failed.push(probe);
     }
-    onStreet?.(probe, probeOk);
+    report(probe, probeOk);
 
     let next = 0;
     const worker = async () => {
@@ -265,7 +276,7 @@ export async function runBoligaTasks(
           console.warn("[hjem] Boliga street failed, server will refetch:", err);
           failed.push(task);
         }
-        onStreet?.(task, ok);
+        report(task, ok);
       }
     };
 
