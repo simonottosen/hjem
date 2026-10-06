@@ -78,10 +78,35 @@ export interface LookupResponse {
 export type ProgressStage =
   | "idle"
   | "dawa"
+  | "boliga_client"
   | "boliga_list"
   | "boliga_properties"
   | "done"
   | "error";
+
+// One street for the browser to fetch from Boliga. Mirrors
+// BoligaPropertyRequest in boliga.go.
+export interface BoligaTask {
+  street: string;
+  zipcode: number;
+  municipality: number;
+}
+
+// What the browser posts back to /api/boliga/ingest. `sales` is Boliga's own
+// results array, untouched — the client relays it rather than reading it, so
+// client-fetched and server-fetched sales reach the same Go matcher.
+export interface BoligaFetchResult {
+  task: BoligaTask;
+  sales: unknown[];
+}
+
+// `failed` holds streets Boliga actively refused. Streets we never reached are
+// simply absent: the server treats anything it handed out and did not get back
+// as its own work, so omission is already the safe default.
+export interface BoligaRelayOutcome {
+  fetched: BoligaFetchResult[];
+  failed: BoligaTask[];
+}
 
 export interface ProgressEvent {
   stage: ProgressStage;
@@ -91,4 +116,7 @@ export interface ProgressEvent {
   elapsed_ms: number;
   warnings?: string[];
   result?: LookupResponse;
+  // Present only while the stage is "boliga_client", so a poll that arrives
+  // after the server stopped waiting cannot restart a relay.
+  boliga_tasks?: BoligaTask[];
 }

@@ -9,12 +9,16 @@ import (
 type ProgressStage string
 
 const (
-	StageIdle       ProgressStage = "idle"
-	StageDawa       ProgressStage = "dawa"
-	StageBoligaList ProgressStage = "boliga_list"
-	StageBoligaProp ProgressStage = "boliga_properties"
-	StageDone       ProgressStage = "done"
-	StageError      ProgressStage = "error"
+	StageIdle ProgressStage = "idle"
+	StageDawa ProgressStage = "dawa"
+	// StageBoligaClient hands the browser a list of streets to fetch from
+	// api.boliga.dk itself. The server blocks here until the client posts
+	// results back, or until it gives up waiting and fetches them itself.
+	StageBoligaClient ProgressStage = "boliga_client"
+	StageBoligaList   ProgressStage = "boliga_list"
+	StageBoligaProp   ProgressStage = "boliga_properties"
+	StageDone         ProgressStage = "done"
+	StageError        ProgressStage = "error"
 )
 
 type ProgressEvent struct {
@@ -25,19 +29,26 @@ type ProgressEvent struct {
 	ElapsedMs int64         `json:"elapsed_ms"`
 	Warnings  []string      `json:"warnings,omitempty"`
 	Result    interface{}   `json:"result,omitempty"`
+
+	// BoligaTasks is the street list the client should fetch. Sent only while
+	// StageBoligaClient is current: the client polls every couple of seconds
+	// and has no use for the list once it has started, so repeating it on every
+	// later poll would be pure payload.
+	BoligaTasks []BoligaPropertyRequest `json:"boliga_tasks,omitempty"`
 }
 
 type Progress struct {
-	mu         sync.Mutex
-	stage      ProgressStage
-	message    string
-	current    int
-	total      int
-	startedAt  time.Time
-	finishedAt time.Time
-	result     interface{}
-	warnings   []string
-	notify     chan struct{}
+	mu          sync.Mutex
+	stage       ProgressStage
+	message     string
+	current     int
+	total       int
+	startedAt   time.Time
+	finishedAt  time.Time
+	result      interface{}
+	warnings    []string
+	boligaTasks []BoligaPropertyRequest
+	notify      chan struct{}
 
 	// now exists so the session store can hold this progress to the same clock
 	// it evicts by. The two are compared against each other — a finished
@@ -88,6 +99,16 @@ func (p *Progress) AddWarning(msg string) {
 	p.mu.Unlock()
 }
 
+// SetBoligaTasks records the street list for the client to fetch. Call it
+// before advancing to StageBoligaClient, never after: a client that polls
+// between the two would see the stage it acts on with no list to act on, and
+// would report every task failed.
+func (p *Progress) SetBoligaTasks(tasks []BoligaPropertyRequest) {
+	p.mu.Lock()
+	p.boligaTasks = tasks
+	p.mu.Unlock()
+}
+
 func (p *Progress) SetResult(result interface{}) {
 	p.mu.Lock()
 	p.result = result
@@ -131,6 +152,9 @@ func (p *Progress) Snapshot() ProgressEvent {
 	}
 	if p.stage == StageDone && p.result != nil {
 		evt.Result = p.result
+	}
+	if p.stage == StageBoligaClient {
+		evt.BoligaTasks = p.boligaTasks
 	}
 	return evt
 }

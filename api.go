@@ -1,6 +1,7 @@
 package hjem
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/csv"
 	"encoding/json"
@@ -16,6 +17,39 @@ import (
 )
 
 const maxBytesLimit = 1024 * 1024 // 1mb
+
+const (
+	// maxBoligaIngestBytes caps the browser's upload. A Boliga sale is about
+	// 500 bytes of JSON and the largest production lookup on record fetched
+	// 9541 of them — roughly 4.8mb — so the ordinary 1mb limit would reject
+	// every real ingest. This leaves room for a worse one.
+	maxBoligaIngestBytes = 16 * 1024 * 1024
+
+	// A byte limit does not bound what the bytes decode into. A BoligaSaleItem
+	// is 184 bytes, while the shortest JSON that produces one is the three of
+	// `{},` — so a 16mb body of empty objects decodes to 3.5gb of live heap,
+	// measured. These cap the decoded side of that ratio.
+	//
+	// Both are far above any real lookup: the densest search observed asked for
+	// 43 streets and returned 2229 sales, and the sales cache for a whole
+	// neighbourhood holds about 10000.
+	maxBoligaIngestSales   = 100_000
+	maxBoligaIngestStreets = 2_000
+)
+
+// boligaClientWait is how long a lookup waits for the browser's results before
+// fetching the streets itself. It has to cover a slow client working through
+// dozens of streets, while still not stranding a lookup whose tab was closed
+// the moment it started.
+//
+// Boliga throttles to about one request per second per IP, so a browser cannot
+// go faster than roughly one street per second however it is written — a
+// measured 500 m search is 24 streets. This must therefore exceed the client's
+// own BUDGET_MS (frontend/src/lib/boliga.ts), or the server would start
+// refetching streets the browser is still on and do the work twice.
+//
+// A var so tests can shorten it, like boligaSoldSearchURL.
+var boligaClientWait = 60 * time.Second
 
 type SalesObject struct {
 	Meta  *Address `json:"meta"`
@@ -142,7 +176,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	}
 
 	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
-	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats)
+	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess))
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
 		return
@@ -181,6 +215,226 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Store result and mark done
 	p.SetResult(luResp)
 	p.Update(StageDone, "Færdig!", 0, 0)
+}
+
+// clientStreetFetcher asks the browser to fetch the street list and falls back
+// to fetching server-side. Boliga rate-limits by IP and dominates lookup
+// latency — 94% of a 3m41s production lookup, almost all of it backoff — so
+// spreading the requests across users' own addresses is the whole point.
+//
+// Every exit from here leaves the lookup able to continue: the browser may
+// return everything, some of it, or nothing at all, and the remainder is
+// always fetched locally.
+func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
+	return func(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []string, error) {
+		if len(tasks) == 0 {
+			return nil, nil, nil
+		}
+
+		// Tasks before stage: a client polling between the two would act on a
+		// stage with no list and report everything failed.
+		progress.SetBoligaTasks(tasks)
+		progress.Update(StageBoligaClient,
+			fmt.Sprintf("Henter salgslister fra Boliga (%d gader)...", len(tasks)), 0, len(tasks))
+
+		var clientSales []BoligaSaleItem
+		remaining := tasks
+
+		// Nothing reads the channel once this returns, so a post that lands
+		// just as we give up would otherwise pin several megabytes of sales in
+		// the buffer until the session is evicted a quarter of an hour later.
+		defer sess.closeBoligaIngest()
+
+		select {
+		case ing := <-sess.boligaIngest:
+			clientSales, remaining = acceptBoligaIngest(ing, tasks, stats)
+		case <-time.After(boligaClientWait):
+			log.Printf("Boliga client fetch: nothing posted within %s; fetching all %d streets server-side",
+				boligaClientWait, len(tasks))
+		case <-sess.ctx.Done():
+			return nil, nil, sess.ctx.Err()
+		}
+
+		if len(remaining) == 0 {
+			return clientSales, nil, nil
+		}
+
+		// Counted in streets, not sales: a street can legitimately have no sales
+		// at all, and judging by the sale count would turn that successful fetch
+		// into "the browser gave us nothing" — failing the whole lookup below
+		// over a street that was simply empty.
+		fetchedStreets := len(tasks) - len(remaining)
+
+		serverSales, warnings, err := fetchStreetsLocally(remaining, progress, stats)
+		if err != nil {
+			// fetchStreetsLocally only errors when every street failed. That is
+			// fatal when it is all we have, but not when the browser already
+			// covered part of the list.
+			if fetchedStreets == 0 {
+				return nil, warnings, err
+			}
+			log.Printf("Boliga client fetch: server-side remainder failed (%v); continuing with %d streets (%d sales) from the browser",
+				err, fetchedStreets, len(clientSales))
+			return clientSales, warnings, nil
+		}
+
+		return append(clientSales, serverSales...), warnings, nil
+	}
+}
+
+// acceptBoligaIngest takes the sales the browser fetched and reports which
+// tasks still need fetching.
+//
+// Streets this lookup never asked for are discarded. Client sales are written
+// to the shared cache untrusted by deliberate product decision, but that is an
+// argument about the contents of an answer, not about answering a question
+// nobody asked: without this check any caller holding a lookup id could inject
+// sales for arbitrary addresses into every later user's results.
+func acceptBoligaIngest(ing *BoligaIngest, tasks []BoligaPropertyRequest, stats *HealthStats) ([]BoligaSaleItem, []BoligaPropertyRequest) {
+	pending := make(map[BoligaPropertyRequest]bool, len(tasks))
+	for _, t := range tasks {
+		pending[t] = true
+	}
+
+	var sales []BoligaSaleItem
+	var unsolicited int
+	for _, f := range ing.Fetched {
+		if !pending[f.Task] {
+			unsolicited++
+			continue
+		}
+		delete(pending, f.Task)
+		sales = append(sales, f.Sales...)
+		if stats != nil {
+			stats.RecordBoligaOK()
+		}
+	}
+
+	// Rebuilt from tasks rather than from the map, to keep the server's retry
+	// order the same as the order it originally handed out.
+	remaining := make([]BoligaPropertyRequest, 0, len(pending))
+	for _, t := range tasks {
+		if pending[t] {
+			remaining = append(remaining, t)
+		}
+	}
+
+	// Failed is logged, never acted on: correctness comes from tasks minus
+	// fetched, so a client that omits it still gets its streets fetched. What
+	// it adds is the distinction between a street Boliga refused and one the
+	// browser never reached, which the remaining count alone cannot show.
+	log.Printf("Boliga client fetch: browser returned %d/%d streets (%d sales), reported %d refused; %d left for the server",
+		len(tasks)-len(remaining), len(tasks), len(sales), len(ing.Failed), len(remaining))
+	if unsolicited > 0 {
+		log.Printf("Boliga client fetch: discarded %d street(s) this lookup did not ask for", unsolicited)
+	}
+
+	return sales, remaining
+}
+
+// boligaIngestEnvelope holds the upload's two arrays as raw bytes, which cost
+// what they weigh. Expanding them is what costs hundreds of times more, so it
+// waits until the lookup id has been recognised — otherwise any caller at all
+// could spend the server's memory without holding one.
+type boligaIngestEnvelope struct {
+	LookupID string          `json:"lookup_id"`
+	Fetched  json.RawMessage `json:"fetched"`
+	Failed   json.RawMessage `json:"failed"`
+}
+
+// decode expands the arrays one element at a time, stopping at the caps rather
+// than allocating first and measuring afterwards.
+func (env *boligaIngestEnvelope) decode() (*BoligaIngest, error) {
+	ing := BoligaIngest{LookupID: env.LookupID}
+
+	sales := 0
+	err := decodeArrayCapped(env.Fetched, maxBoligaIngestStreets, func(f BoligaFetchResult) error {
+		if sales += len(f.Sales); sales > maxBoligaIngestSales {
+			return fmt.Errorf("ingest holds more than %d sales", maxBoligaIngestSales)
+		}
+		ing.Fetched = append(ing.Fetched, f)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	err = decodeArrayCapped(env.Failed, maxBoligaIngestStreets, func(t BoligaPropertyRequest) error {
+		ing.Failed = append(ing.Failed, t)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &ing, nil
+}
+
+// decodeArrayCapped decodes a JSON array element by element, handing each to
+// emit and refusing to read past limit of them. Decoding the array whole would
+// size the allocation on the sender's say-so.
+//
+// A missing or null array is not an error: the client reports streets it never
+// reached by omitting them.
+func decodeArrayCapped[T any](raw json.RawMessage, limit int, emit func(T) error) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil {
+		return err
+	} else if tok != json.Delim('[') {
+		return fmt.Errorf("expected a JSON array, got %v", tok)
+	}
+
+	for n := 0; dec.More(); n++ {
+		if n >= limit {
+			return fmt.Errorf("ingest holds more than %d streets", limit)
+		}
+		var v T
+		if err := dec.Decode(&v); err != nil {
+			return err
+		}
+		if err := emit(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *server) handleBoligaIngest() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body := http.MaxBytesReader(w, r.Body, maxBoligaIngestBytes)
+		defer body.Close()
+
+		var env boligaIngestEnvelope
+		if err := json.NewDecoder(body).Decode(&env); err != nil {
+			replyJSONErr(w, err, http.StatusBadRequest)
+			return
+		}
+
+		sess, ok := s.sessions.Get(env.LookupID)
+		if !ok {
+			replyJSONErr(w, ErrUnknownSession, http.StatusNotFound)
+			return
+		}
+
+		ing, err := env.decode()
+		if err != nil {
+			replyJSONErr(w, err, http.StatusBadRequest)
+			return
+		}
+
+		if sess.offerBoligaIngest(ing) {
+			replyJSON(w, map[string]string{"status": "accepted"}, http.StatusAccepted)
+			return
+		}
+		// The lookup already stopped waiting, or this is a duplicate post.
+		// Either way the streets are covered server-side, so this is not an
+		// error the client can or should act on.
+		replyJSON(w, map[string]string{"status": "ignored"}, http.StatusOK)
+	}
 }
 
 func (s *server) handleCSVDownload() http.HandlerFunc {
@@ -227,7 +481,9 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			addrs = append(addrs, addrsInRange...)
 		}
 
-		sales, _, err := s.bc.FetchSales(addrs, nil, s.stats)
+		// Server-side: the CSV export has no browser waiting on a progress
+		// stream to relay through, and its volume is low enough not to matter.
+		sales, _, err := s.bc.FetchSales(addrs, nil, s.stats, fetchStreetsLocally)
 		if err != nil {
 			// handle error
 		}
@@ -318,6 +574,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/dist/app.bundle.js", s.handleBundle())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
 	mux.HandleFunc("/api/progress", s.handleProgress())
+	mux.HandleFunc("/api/boliga/ingest", s.handleBoligaIngest())
 	mux.HandleFunc("/api/health", s.handleHealth())
 	mux.HandleFunc("/metrics", s.handleMetrics())
 	mux.HandleFunc("/download/csv", s.handleCSVDownload())
