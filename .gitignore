@@ -183,3 +183,6 @@ hjem
 
 # macOS
 .DS_Store
+
+# Local agent tooling
+agent-orchestrator.yaml
