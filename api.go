@@ -226,7 +226,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 // return everything, some of it, or nothing at all, and the remainder is
 // always fetched locally.
 func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
-	return func(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []string, error) {
+	return func(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
 		if len(tasks) == 0 {
 			return nil, nil, nil
 		}
@@ -265,20 +265,20 @@ func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
 		// over a street that was simply empty.
 		fetchedStreets := len(tasks) - len(remaining)
 
-		serverSales, warnings, err := fetchStreetsLocally(remaining, progress, stats)
+		serverSales, failures, err := fetchStreetsLocally(remaining, progress, stats)
 		if err != nil {
 			// fetchStreetsLocally only errors when every street failed. That is
 			// fatal when it is all we have, but not when the browser already
 			// covered part of the list.
 			if fetchedStreets == 0 {
-				return nil, warnings, err
+				return nil, failures, err
 			}
 			log.Printf("Boliga client fetch: server-side remainder failed (%v); continuing with %d streets (%d sales) from the browser",
 				err, fetchedStreets, len(clientSales))
-			return clientSales, warnings, nil
+			return clientSales, failures, nil
 		}
 
-		return append(clientSales, serverSales...), warnings, nil
+		return append(clientSales, serverSales...), failures, nil
 	}
 }
 
