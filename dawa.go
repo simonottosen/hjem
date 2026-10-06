@@ -1,7 +1,11 @@
 package hjem
 
+// dawa.go keeps the DAWA name but no longer talks to DAWA — the service shut
+// down on 1 Oct 2026, and address lookups now go to Adressevælgeren and
+// Datafordeleren. The Dawa* names stay because renaming them would rewrite the
+// database schema and the JSON wire format for no functional gain.
+
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,26 +18,9 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	addrEndpoint = "https://api.dataforsyningen.dk/adresser"
-)
-
 var (
 	ErrNotFoundAddr = errors.New("Unable to find address")
 )
-
-type DAWAAddress struct {
-	UUID             string  `json:"id"`
-	FullText         string  `json:"betegnelse"`
-	StreetName       string  `json:"vejnavn"`
-	StreetNumber     string  `json:"husnr"`
-	Floor            *string `json:"etage"`
-	Door             *string `json:"dør"`
-	PostalCode       string  `json:"postnr"`
-	MunicipalityCode string  `json:"kommunekode"`
-	Latitude         float64 `json:"x"`
-	Longtitude       float64 `json:"y"`
-}
 
 type Address struct {
 	ID               uint    `json:"-" gorm:"primaryKey"`
@@ -571,82 +558,4 @@ type DawaRequest interface {
 	Request() *http.Request
 	MaxAge() time.Duration
 	Fetch() ([]*Address, error)
-}
-
-func reqToAddrs(req *http.Request) ([]*Address, error) {
-	q := req.URL.Query()
-	q.Add("struktur", "mini")
-	req.URL.RawQuery = q.Encode()
-
-	log.Printf("Fetching DAWA: %s", req.URL)
-	resp, err := DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("DAWA request failed: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("DAWA returned status %d", resp.StatusCode)
-		return nil, fmt.Errorf("DAWA API returned status %d", resp.StatusCode)
-	}
-
-	var temp []*DAWAAddress
-	if err := json.NewDecoder(resp.Body).Decode(&temp); err != nil {
-		log.Printf("DAWA decode failed: %v", err)
-		return nil, err
-	}
-	log.Printf("DAWA returned %d addresses", len(temp))
-
-	output := make([]*Address, len(temp))
-	for i, d := range temp {
-		output[i] = &Address{
-			DawaUUID:         d.UUID,
-			DawaID:           d.FullText,
-			StreetName:       d.StreetName,
-			StreetNumber:     d.StreetNumber,
-			Floor:            d.Floor,
-			Door:             d.Door,
-			PostalCode:       d.PostalCode,
-			MunicipalityCode: d.MunicipalityCode,
-			Latitude:         d.Latitude,
-			Longtitude:       d.Longtitude,
-		}
-	}
-
-	return output, nil
-}
-
-// DawaFuzzySearch is gone: DAWA's free-text `q=` search was withdrawn on
-// 17 Aug 2026. Its replacement is AVFuzzySearch (Adressevælgeren), in
-// adressevaelger.go.
-//
-// DawaNearbySearch below is retained only so cmd/compare-radius can still A/B
-// the DAR radius search against DAWA's `cirkel=` for as long as DAWA answers
-// (full shutdown 1 Oct 2026). No production path uses it — api.go's
-// constructRanges calls DARNearbySearch.
-
-type DawaNearbySearch struct {
-	Addr   Address
-	Meters int
-}
-
-func (dns DawaNearbySearch) Request() *http.Request {
-	req, _ := http.NewRequest("GET", addrEndpoint, nil)
-	qStr := fmt.Sprintf("%f,%f,%d", dns.Addr.Latitude, dns.Addr.Longtitude, dns.Meters)
-
-	q := req.URL.Query()
-	q.Add("cirkel", qStr)
-	req.URL.RawQuery = q.Encode()
-
-	return req
-}
-
-func (dns DawaNearbySearch) Fetch() ([]*Address, error) {
-	req := dns.Request()
-	return reqToAddrs(req)
-}
-
-func (dfs DawaNearbySearch) MaxAge() time.Duration {
-	return 365 * 24 * time.Hour
 }

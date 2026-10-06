@@ -292,7 +292,7 @@ Dingeo aggregates valuations from multiple external models including the Danish 
 | [Datafordeleren (DAR)](https://datafordeler.dk) | Nearby-address radius search over the official address register | `https://graphql.datafordeler.dk/DAR/v3` |
 | [Dingeo](https://www.dingeo.dk) | Aggregated public valuation models | Via FlareSolverr or direct request |
 
-Address data previously came from [DAWA](https://dawadocs.dataforsyningen.dk), which is being retired: free-text autocomplete was withdrawn on 17 Aug 2026 and the service shuts down entirely on 1 Oct 2026. Klimadatastyrelsen's [mapping guide](https://confluence.kds.dk/display/DML/Mapning+fra+DAWA+til+Datafordeleren) splits the replacement across two services, which is why both appear above: Datafordeleren's DAR GraphQL only supports exact matching (`eq`/`in`/`startsWith`) and cannot do free-text search, while Adressevælgeren has no radius search.
+Address data came from [DAWA](https://dawadocs.dataforsyningen.dk) until it shut down on 1 Oct 2026. Klimadatastyrelsen's [mapping guide](https://confluence.kds.dk/display/DML/Mapning+fra+DAWA+til+Datafordeleren) splits the replacement across two services, which is why both appear above: Datafordeleren's DAR GraphQL only supports exact matching (`eq`/`in`/`startsWith`) and cannot do free-text search, while Adressevælgeren has no radius search.
 
 Coordinates from both services are EPSG:25832 (ETRS89 / UTM zone 32N) easting/northing in metres, not WGS84 degrees; `datafordeler.go` projects them.
 
@@ -362,7 +362,7 @@ go test ./...
 ├── comps.go         # Gaussian-weighted comparable sales estimation
 ├── adressevaelger.go # Adressevælgeren free-text search and address enrichment
 ├── datafordeler.go  # Datafordeleren DAR radius search and EPSG:25832 projection
-├── dawa.go          # Legacy DAWA client, retained only for cmd/compare-radius
+├── dawa.go          # Address model and the URL-keyed address query cache
 ├── dingeo.go        # Dingeo + FlareSolverr valuation fetcher
 ├── health.go        # /api/health and /metrics handlers
 ├── http.go          # Shared HTTP client with retry/backoff logic
