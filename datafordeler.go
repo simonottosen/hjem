@@ -1,11 +1,10 @@
 package hjem
 
-// datafordeler.go implements a radius (nearby) address search against the new
-// Datafordeleren DAR GraphQL service. It is the planned replacement for DAWA's
-// `cirkel` query (see DawaNearbySearch in dawa.go), which is being retired when
-// DAWA closes on 17 August 2026.
+// datafordeler.go implements a radius (nearby) address search against the
+// Datafordeleren DAR GraphQL service.
 //
-// DAWA exposed a one-call REST circle search. Datafordeleren has no direct
+// It replaced DAWA's `cirkel` query when DAWA shut down on 1 Oct 2026. DAWA
+// exposed a one-call REST circle search; Datafordeleren has no direct
 // equivalent, so this implementation:
 //   1. Projects the WGS84/ETRS89 centre point to EPSG:25832 (UTM zone 32N),
 //      the CRS DAR stores all geometry in.
@@ -144,12 +143,6 @@ func circlePolygonWKT(latDeg, lonDeg, radiusM float64, segments int) string {
 	return b.String()
 }
 
-// HaversineMeters returns the great-circle distance in metres between two
-// lat/lon points. Exposed for the compare-radius tool.
-func HaversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
-	return haversineKm(lat1, lon1, lat2, lon2) * 1000
-}
-
 // ---------------------------------------------------------------------------
 // Datafordeleren DAR GraphQL radius search
 // ---------------------------------------------------------------------------
@@ -253,9 +246,9 @@ func darEndpoint() (string, error) {
 	return u.String(), nil
 }
 
-// DARNearbySearch is the Datafordeleren equivalent of DawaNearbySearch. It
-// implements the DawaRequest interface so it can be swapped into the existing
-// caching layer (dawaCacher.Do).
+// DARNearbySearch is the radius search behind every lookup. It implements the
+// DawaRequest interface so it goes through the shared caching layer
+// (dawaCacher.Do).
 type DARNearbySearch struct {
 	Addr     Address
 	Meters   int
