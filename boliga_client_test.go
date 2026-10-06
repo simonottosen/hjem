@@ -524,3 +524,152 @@ func TestIngestBoundsDecodedSize(t *testing.T) {
 		}
 	})
 }
+
+// seedCacher gives a test a cacher over its own database, already holding the
+// addresses. NewBoligaCacher migrates Sale but not Address, and FetchSales
+// writes addresses back, so the Address table has to be created separately.
+func seedCacher(t *testing.T, addrs []*Address) *boligaCacher {
+	t.Helper()
+
+	db := newTestDB(t)
+	if err := db.AutoMigrate(&Address{}); err != nil {
+		t.Fatalf("migrate addresses: %v", err)
+	}
+	for _, a := range addrs {
+		if err := db.Create(a).Error; err != nil {
+			t.Fatalf("seed %s: %v", a.DawaID, err)
+		}
+	}
+	return NewBoligaCacher(db)
+}
+
+// A failed street reads the same whether it cost the search one address or a
+// thousand. One production lookup lost a single street out of fifty-one and
+// told the user only "Kunne ikke hente salg for Matthæusgade" — no sense of
+// how much of the radius that covered, and no sign that nothing came from
+// cache either.
+func TestPartialFetchWarningCountsCoverage(t *testing.T) {
+	addr := func(street, number, zip string, collected time.Time) *Address {
+		return &Address{
+			DawaID: street + " " + number + ", " + zip, StreetName: street,
+			StreetNumber: number, PostalCode: zip, MunicipalityCode: "101",
+			BoligaCollectedAt: collected,
+		}
+	}
+
+	// Three addresses on the street that fails, one on the street that works,
+	// and one already cached — so every number in the summary is distinct and a
+	// transposed pair cannot pass by coincidence.
+	addrs := []*Address{
+		addr("Matthæusgade", "1", "1666", time.Time{}),
+		addr("Matthæusgade", "3", "1666", time.Time{}),
+		addr("Matthæusgade", "5", "1666", time.Time{}),
+		addr("Nørregade", "2", "1165", time.Time{}),
+		addr("Enghavevej", "7", "1674", time.Now()),
+	}
+
+	bc := seedCacher(t, addrs)
+
+	blocked := fmt.Errorf("Matthæusgade 1666: status 403")
+	fetch := func(tasks []BoligaPropertyRequest, _ *Progress, _ *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		var failures []BoligaStreetFailure
+		for _, tk := range tasks {
+			if tk.StreetName == "Matthæusgade" {
+				failures = append(failures, BoligaStreetFailure{Task: tk, Err: blocked})
+			}
+		}
+		return nil, failures, nil
+	}
+
+	_, warnings, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch)
+	if err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("got %d warnings, want a summary plus the failed street: %v", len(warnings), warnings)
+	}
+
+	// 5 addresses: 3 lost with Matthæusgade, 1 fetched on Nørregade, 1 cached.
+	// 2 streets were asked for because the cached address needed no query.
+	for _, want := range []string{
+		"3 af 5 adresser blev ikke dækket",
+		"1 af 2 gadeopslag fejlede",
+		"De øvrige 2 blev dækket",
+		"1 fra cache",
+		"1 hentet fra Boliga nu",
+	} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("summary is missing %q; got %q", want, warnings[0])
+		}
+	}
+
+	// The per-street detail must survive the summary, not be replaced by it.
+	if !strings.Contains(warnings[1], "Matthæusgade") || !strings.Contains(warnings[1], "blokeret af Boliga") {
+		t.Errorf("warnings[1] = %q, want the Matthæusgade failure", warnings[1])
+	}
+}
+
+// Boliga failing wholesale fails every street at once. Listing all of them
+// pushes the one line carrying the counts off the top of the banner, so the
+// detail is sampled and the rest is left as a number.
+func TestManyFailedStreetsAreSummarizedNotListed(t *testing.T) {
+	var addrs []*Address
+	for i := range 10 {
+		street := fmt.Sprintf("Gade%d", i)
+		addrs = append(addrs, &Address{
+			DawaID: street + " 1", StreetName: street, StreetNumber: "1",
+			PostalCode: "1666", MunicipalityCode: "101",
+		})
+	}
+	bc := seedCacher(t, addrs)
+
+	fetch := func(tasks []BoligaPropertyRequest, _ *Progress, _ *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		failures := make([]BoligaStreetFailure, 0, len(tasks))
+		for _, tk := range tasks {
+			failures = append(failures, BoligaStreetFailure{Task: tk, Err: fmt.Errorf("status 429")})
+		}
+		// Not an error: every street failed, but FetchSales must still be able
+		// to report partial coverage rather than abort, so the stub reports the
+		// failures without claiming the whole fetch collapsed.
+		return nil, failures, nil
+	}
+
+	_, warnings, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch)
+	if err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+
+	// Summary + maxStreetWarnings samples + the "and N others" line.
+	if len(warnings) != maxStreetWarnings+2 {
+		t.Fatalf("got %d warnings, want %d: %v", len(warnings), maxStreetWarnings+2, warnings)
+	}
+	if !strings.Contains(warnings[0], "10 af 10 adresser blev ikke dækket") {
+		t.Errorf("summary = %q, want all 10 addresses reported uncovered", warnings[0])
+	}
+	if last := warnings[len(warnings)-1]; !strings.Contains(last, "og 7 andre gader") {
+		t.Errorf("last warning = %q, want the remaining 7 streets collapsed into a count", last)
+	}
+}
+
+// A fetch that loses nothing must stay silent. A summary on every lookup would
+// train users to ignore the banner, which is where the real failures appear.
+func TestCompleteFetchWarnsNothing(t *testing.T) {
+	addrs := []*Address{{
+		DawaID: "Nørregade 2, 1165", StreetName: "Nørregade",
+		StreetNumber: "2", PostalCode: "1165", MunicipalityCode: "101",
+	}}
+
+	bc := seedCacher(t, addrs)
+
+	fetch := func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		return []BoligaSaleItem{clientSale("Nørregade 2", 2_000_000)}, nil, nil
+	}
+
+	_, warnings, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch)
+	if err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("got %v, want no warnings when every street came back", warnings)
+	}
+}

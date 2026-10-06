@@ -40,6 +40,24 @@ type BoligaCacher interface {
 	FetchSales([]*Address, *Progress, *HealthStats, BoligaStreetFetcher) ([][]Sale, []string, error)
 }
 
+// BoligaStreetFailure is one street query that did not come back. It is carried
+// as the task plus the error rather than as a finished Danish sentence because
+// the caller has to count the addresses sitting behind the failed street before
+// it can say how much of the search went uncovered.
+type BoligaStreetFailure struct {
+	Task BoligaPropertyRequest
+	Err  error
+}
+
+// addrStreetTask is the Boliga query that covers an address. Attributing a
+// failed query back to the addresses it would have covered means grouping them
+// the same way the task list was built, so both sides go through here.
+func addrStreetTask(a *Address) BoligaPropertyRequest {
+	mun, _ := strconv.Atoi(a.MunicipalityCode)
+	zip, _ := strconv.Atoi(a.PostalCode)
+	return BoligaPropertyRequest{StreetName: a.StreetName, ZipCode: zip, MunicipalityID: mun}
+}
+
 // BoligaStreetFetcher obtains the sales for a list of street queries. The
 // server has two: fetchStreetsLocally, which issues the requests itself, and
 // the session-aware one in api.go, which asks the browser to issue them and
@@ -48,7 +66,7 @@ type BoligaCacher interface {
 // Only the fetching varies. Planning the street list and matching sales back
 // to addresses are shared, so valuation behaviour cannot drift between the two
 // paths.
-type BoligaStreetFetcher func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []string, error)
+type BoligaStreetFetcher func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error)
 
 type boligaCacher struct {
 	db *gorm.DB
@@ -109,11 +127,14 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		// 10-day shared cache worth having once fetching moves to the browser:
 		// a warm cache still hands the client an empty list.
 		tasks := BoligaStreetTasks(addrsToFetch)
-		totalSales, fetchWarnings, err := fetch(tasks, progress, stats)
-		warnings = fetchWarnings
+		totalSales, failures, err := fetch(tasks, progress, stats)
 		if err != nil {
-			return nil, warnings, err
+			// No coverage summary here: the lookup is being abandoned, so
+			// "the other N addresses were covered" would describe a result
+			// nobody is going to see.
+			return nil, failureWarnings(failures), err
 		}
+		warnings = summarizeFetch(len(cachedAddrs), addrsToFetch, len(tasks), failures)
 		matched := matchSalesToAddrs(addrsToFetch, totalSales)
 
 		var salesToStore []Sale
@@ -201,6 +222,64 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 	return sales, warnings, nil
 }
 
+// maxStreetWarnings bounds the per-street detail. Boliga failing wholesale
+// fails every street in the search at once — fifty-one of them in one
+// production lookup — and that many near-identical lines in the banner buries
+// the summary that says how much was actually lost.
+const maxStreetWarnings = 3
+
+func failureWarnings(failures []BoligaStreetFailure) []string {
+	shown := min(len(failures), maxStreetWarnings)
+	warnings := make([]string, 0, shown+1)
+	for _, f := range failures[:shown] {
+		warnings = append(warnings, fmt.Sprintf("Kunne ikke hente salg for %s (%s)",
+			f.Task.StreetName, classifyError(f.Err)))
+	}
+	if rest := len(failures) - shown; rest > 0 {
+		warnings = append(warnings, fmt.Sprintf("… og %d andre gader", rest))
+	}
+	return warnings
+}
+
+// summarizeFetch puts a count in front of the per-street failures. On its own
+// "Kunne ikke hente salg for Matthæusgade" says nothing about how much of the
+// search it cost: the same sentence appears whether one street out of fifty-one
+// failed or forty-nine did.
+//
+// Coverage is counted in addresses because that is the unit the search was made
+// in — a user asks for a radius, not for streets. It deliberately reports
+// addresses *covered* rather than addresses *with sales*: most addresses have
+// no recent sale at all (one production lookup matched 1113 sales across 9541
+// addresses), so equating "we asked about it" with "we found something" would
+// be wrong far more often than right.
+func summarizeFetch(cached int, fetchAddrs []*Address, streetCount int, failures []BoligaStreetFailure) []string {
+	if len(failures) == 0 {
+		return nil
+	}
+
+	failed := make(map[BoligaPropertyRequest]bool, len(failures))
+	for _, f := range failures {
+		failed[f.Task] = true
+	}
+
+	var missing int
+	for _, a := range fetchAddrs {
+		if failed[addrStreetTask(a)] {
+			missing++
+		}
+	}
+
+	// Derived rather than passed in: every address is either cached or queued
+	// for fetching, so a separate total could only ever disagree with the parts.
+	total := cached + len(fetchAddrs)
+	summary := fmt.Sprintf(
+		"Ufuldstændigt datagrundlag: %d af %d adresser blev ikke dækket, fordi %d af %d gadeopslag fejlede. De øvrige %d blev dækket (%d fra cache, %d hentet fra Boliga nu).",
+		missing, total, len(failures), streetCount,
+		total-missing, cached, len(fetchAddrs)-missing)
+
+	return append([]string{summary}, failureWarnings(failures)...)
+}
+
 type Sale struct {
 	AddrID    uint      `json:"-"`
 	AmountDKK int       `json:"amount"`
@@ -245,7 +324,8 @@ type BoligaPageCrawl struct {
 func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthStats) ([][]BoligaSaleItem, []string, error) {
 	tasks := BoligaStreetTasks(addrs)
 
-	totalSales, warnings, err := fetchStreetsLocally(tasks, progress, stats)
+	totalSales, failures, err := fetchStreetsLocally(tasks, progress, stats)
+	warnings := failureWarnings(failures)
 	if err != nil {
 		return nil, warnings, err
 	}
@@ -263,32 +343,20 @@ func BoligaSalesFromAddrs(addrs []*Address, progress *Progress, stats *HealthSta
 // this list out and correlates results back against it, and a list that
 // reshuffled per call would make that correlation non-reproducible.
 func BoligaStreetTasks(addrs []*Address) []BoligaPropertyRequest {
-	type K struct {
-		Municipality string
-		Street       string
-		ZipCode      string
-	}
-
-	seen := map[K]bool{}
+	// Deduped on the task itself rather than on the address fields it came
+	// from. Those are strings and the task holds ints, so "0101" and "101"
+	// counted as two streets and then produced byte-identical requests — two
+	// trips to a rate-limited Boliga for one street, and a pair acceptBoligaIngest
+	// could not tell apart, since it keys pending work on the same struct.
+	seen := map[BoligaPropertyRequest]bool{}
 	var tasks []BoligaPropertyRequest
 	for _, addr := range addrs {
-		k := K{
-			Municipality: addr.MunicipalityCode,
-			Street:       addr.StreetName,
-			ZipCode:      addr.PostalCode,
-		}
-		if seen[k] {
+		t := addrStreetTask(addr)
+		if seen[t] {
 			continue
 		}
-		seen[k] = true
-
-		mun, _ := strconv.Atoi(addr.MunicipalityCode)
-		zip, _ := strconv.Atoi(addr.PostalCode)
-		tasks = append(tasks, BoligaPropertyRequest{
-			StreetName:     addr.StreetName,
-			ZipCode:        zip,
-			MunicipalityID: mun,
-		})
+		seen[t] = true
+		tasks = append(tasks, t)
 	}
 
 	return tasks
@@ -297,19 +365,18 @@ func BoligaStreetTasks(addrs []*Address) []BoligaPropertyRequest {
 // fetchStreetsLocally runs the street queries from this process. A single
 // street failing is not fatal — the remaining streets still produce a usable
 // estimate — but every street failing is, since there is nothing left to value.
-func fetchStreetsLocally(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []string, error) {
+func fetchStreetsLocally(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
 	totalReqs := len(tasks)
-	var completedReqs, failedReqs int
+	var completedReqs int
 	var totalSales []BoligaSaleItem
-	var warnings []string
+	var failures []BoligaStreetFailure
 
 	log.Printf("Fetching sales for %d streets...", totalReqs)
 
 	for _, req := range tasks {
-		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+failedReqs+1, totalReqs), completedReqs+failedReqs, totalReqs)
+		progress.Update(StageBoligaList, fmt.Sprintf("Henter salgsliste %d/%d...", completedReqs+len(failures)+1, totalReqs), completedReqs+len(failures), totalReqs)
 		s, err := req.Fetch()
 		if err != nil {
-			failedReqs++
 			errType := "unknown"
 			if strings.Contains(err.Error(), "status 429") {
 				errType = "rate_limit"
@@ -322,7 +389,7 @@ func fetchStreetsLocally(tasks []BoligaPropertyRequest, progress *Progress, stat
 			if stats != nil {
 				stats.RecordBoligaFail(errType, fmt.Sprintf("%s %d: %v", req.StreetName, req.ZipCode, err))
 			}
-			warnings = append(warnings, fmt.Sprintf("Kunne ikke hente salg for %s (%s)", req.StreetName, classifyError(err)))
+			failures = append(failures, BoligaStreetFailure{Task: req, Err: err})
 			continue // Continue with remaining streets instead of aborting
 		}
 		completedReqs++
@@ -333,13 +400,13 @@ func fetchStreetsLocally(tasks []BoligaPropertyRequest, progress *Progress, stat
 		totalSales = append(totalSales, s...)
 	}
 
-	log.Printf("Completed %d/%d streets (%d sales, %d failed)", completedReqs, totalReqs, len(totalSales), failedReqs)
+	log.Printf("Completed %d/%d streets (%d sales, %d failed)", completedReqs, totalReqs, len(totalSales), len(failures))
 
-	if completedReqs == 0 && failedReqs > 0 {
-		return nil, warnings, fmt.Errorf("alle %d gade-opslag fejlede", failedReqs)
+	if completedReqs == 0 && len(failures) > 0 {
+		return nil, failures, fmt.Errorf("alle %d gade-opslag fejlede", len(failures))
 	}
 
-	return totalSales, warnings, nil
+	return totalSales, failures, nil
 }
 
 // matchSalesToAddrs attributes each sale to the address it belongs to. It is
