@@ -20,18 +20,30 @@ export function streetKey(t: BoligaTask): string {
   return `${t.street}|${t.zipcode}|${t.municipality}`;
 }
 
-// Measured against api.boliga.dk: twelve back-to-back requests return 429 from
-// about the seventh, while the same twelve spaced a second apart all return
-// 200. Boliga serves a small burst and then throttles to roughly one request
-// per second, so the *rate* is what has to be controlled. Running six at once
-// spends the burst allowance immediately and 429s the rest of the lookup —
-// measured at 21 of 24 streets handed straight back to the server.
-const MIN_REQUEST_GAP_MS = 1000;
+// Boliga states its limit in every response: `x-ratelimit-limit: 5` with an
+// `x-ratelimit-reset` about eleven seconds out, and each spent request returns
+// to the bucket eleven seconds later. Measured — six requests succeed, the
+// seventh 429s, and the header says to come back in ten seconds — so the
+// sustainable rate is five per eleven seconds, not the one per second an
+// earlier reading of a full bucket suggested. A gap of one second therefore
+// 429s from the seventh request onwards and spends the budget below on
+// backoff, which is how a measured 27-street lookup offloaded only 6 streets.
+//
+// Must stay in step with hostRequestGap in http.go, which paces the server's
+// own fetching of the streets this relay does not reach.
+const MIN_REQUEST_GAP_MS = 2200;
 
 // Parallelism only hides round-trip latency here; the pacer above is what
 // bounds the request rate. Two is enough to keep a request in flight while the
 // previous response is being parsed.
 const CONCURRENCY = 2;
+
+// Boliga answers per street, so a street query returns the whole street —
+// Nørrebrogade 2200 is 401 sales, nine requests at Boliga's default page size
+// of 50 and one at this one. At five requests per eleven seconds, pages are
+// what the budget below is actually spent on. Must match boligaPageSize in
+// boliga.go: the two fetch paths have to return the same sales.
+const PAGE_SIZE = 500;
 
 // Must stay below boligaClientWait in api.go, which is how long the server
 // waits before fetching the streets itself. Overrunning it is the worst
@@ -44,13 +56,17 @@ const CONCURRENCY = 2;
 // overrun it by design and leave the remainder to the server.
 const BUDGET_MS = 45_000;
 
-// Boliga rate-limits hard enough that the server's own transport
-// (RetryRoundTripper in http.go) logs dozens of 429s per lookup and survives
-// only by backing off 2s..32s. Without a ladder of its own the browser hands
-// back almost every street the moment a user's IP is throttled — which the
-// issue lists as an expected consequence of moving the traffic here. Shorter
-// rungs than the server's, because the whole run is bounded by BUDGET_MS.
-const RETRY_BACKOFF_MS = [1000, 2000, 4000];
+// Without a ladder of its own the browser hands back almost every street the
+// moment a user's IP is throttled, which costs nothing in correctness — the
+// server fetches whatever this relay does not reach — but gives up the point
+// of fetching here at all.
+//
+// Deliberately shorter than the server's. Every rung costs a request slot plus
+// its own sleep, and both come out of BUDGET_MS below, while handing a street
+// back costs only the server's own paced fetch of it. A third rung would spend
+// a fourth slot and four more seconds — roughly a tenth of the whole run — on
+// one street, to hand it back anyway.
+const RETRY_BACKOFF_MS = [1000, 2000];
 
 // Thrown when fetch() itself rejects rather than returning a bad status: the
 // browser never reached Boliga at all. An ad blocker, an extension, being
@@ -72,7 +88,11 @@ class SystemicFailure extends Error {
 // this; changing one without the other makes client and server fetches return
 // different sales for the same street.
 function buildUrl(task: BoligaTask, page: number): string {
-  const q = new URLSearchParams({ searchTab: "1", sort: "date-a" });
+  const q = new URLSearchParams({
+    searchTab: "1",
+    sort: "date-a",
+    pagesize: String(PAGE_SIZE),
+  });
 
   if (task.zipcode > 0) {
     q.set("zipcodeFrom", String(task.zipcode));

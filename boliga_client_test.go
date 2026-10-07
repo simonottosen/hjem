@@ -379,6 +379,10 @@ func TestServerBoligaQueryShape(t *testing.T) {
 		"street":       "Vestergade",
 		"municipality": "101",
 		"page":         "1",
+		// A page size the two sides disagree on would not change which sales
+		// exist, but it would change how many requests each spends reaching
+		// them — and both budgets are counted in requests, not bytes.
+		"pagesize": "500",
 	}
 	for k, v := range want {
 		if got.Get(k) != v {

@@ -545,6 +545,19 @@ type BoligaPropertyRequest struct {
 // different host from boligaBaseUrl above.
 var boligaSoldSearchURL = "https://api.boliga.dk/api/v2/sold/search/results"
 
+// Boliga defaults to 50 sales per page and honours `pagesize` up to at least
+// 2000. Since it answers per street rather than per address, a street query is
+// the whole street: Nørrebrogade 2200 is 401 sales, nine requests at the
+// default and one at this size. Requests — not bytes — are what the lookup
+// pays for, because the host allows only about five of them every eleven
+// seconds (hostRequestGap in http.go), so collapsing nine into one is worth
+// far more than any pacing of the nine.
+//
+// 500 rather than the maximum: it clears all but the densest arterial streets
+// in a single request, and the browser relay has to post every sale it
+// receives back to the server, where the ingest is capped at 16 MB.
+const boligaPageSize = 500
+
 func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
 	req, err := http.NewRequest("GET", boligaSoldSearchURL, nil)
 	if err != nil {
@@ -555,6 +568,7 @@ func (r BoligaPropertyRequest) Fetch() ([]BoligaSaleItem, error) {
 	q := req.URL.Query()
 	q.Add("searchTab", "1")
 	q.Add("sort", "date-a")
+	q.Add("pagesize", strconv.Itoa(boligaPageSize))
 
 	if r.ZipCode > 0 {
 		q.Add("zipcodeFrom", strconv.Itoa(r.ZipCode))

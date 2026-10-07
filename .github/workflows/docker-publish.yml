@@ -12,7 +12,31 @@ env:
   IMAGE_NAME: simonottosen/hjem
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # frontend/dist is gitignored, but api.go embeds it, so a fresh checkout
+      # will not compile without it. The real bundle is built by the Dockerfile;
+      # nothing under test reads these files.
+      - name: Stub the embedded frontend bundle
+        run: |
+          mkdir -p frontend/dist
+          touch frontend/dist/index.html
+
+      - name: Test
+        run: go test ./...
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
