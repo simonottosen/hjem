@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -138,6 +139,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		matched := matchSalesToAddrs(addrsToFetch, totalSales)
 
 		var salesToStore []Sale
+		var addrsToStore []*Address
 		for i, items := range matched {
 			if len(items) == 0 {
 				continue
@@ -178,9 +180,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 				}
 			}
 
-			if err := bc.db.Save(&addr).Error; err != nil {
-				return nil, warnings, err
-			}
+			addrsToStore = append(addrsToStore, addr)
 		}
 
 		if len(salesToStore) > 0 {
@@ -195,7 +195,30 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		for _, addr := range addrsToFetch {
 			if addr.BoligaCollectedAt.IsZero() {
 				addr.BoligaCollectedAt = fetchTime
-				bc.db.Save(addr)
+				addrsToStore = append(addrsToStore, addr)
+			}
+		}
+
+		// A dense first lookup stamps some 2900 addresses, and a statement each
+		// is merely slow against SQLite but a network round-trip each against
+		// the Postgres deployment. These rows all exist already, yet each
+		// carries its own metadata, so no single UPDATE ... WHERE id IN (...)
+		// expresses them: an upsert is the only batched row-update either
+		// engine offers.
+		//
+		// The conflict target is named rather than left implicit because
+		// addresses carry unique indexes on dawa_id and dawa_uuid as well, and
+		// only a conflict on the arbiter index resolves to DO UPDATE; every row
+		// here is written back under the id it was read with. Batched at 50
+		// like the sales above: an address is nineteen columns and a radius
+		// search can carry ten thousand of them, which as one statement would
+		// run past the 65535 bind parameters Postgres accepts.
+		if len(addrsToStore) > 0 {
+			if err := bc.db.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "id"}},
+				UpdateAll: true,
+			}).CreateInBatches(addrsToStore, 50).Error; err != nil {
+				return nil, warnings, err
 			}
 		}
 	}
