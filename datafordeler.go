@@ -288,8 +288,27 @@ func (d DARNearbySearch) Request() *http.Request {
 	return req
 }
 
+// darRadiusMaxAge is deliberately far shorter than the age a resolved address
+// is held for. The two go through the same cache but are not the same kind of
+// answer: "where is this address" stays true, whereas "which addresses lie
+// within N metres of this point" is a set that grows every time something is
+// built. A year-old entry cannot see a completed development at all, and the
+// denser the area — the areas worth valuing — the likelier someone already
+// warmed it.
+//
+// Four weeks, rather than the days the staleness argument alone would suggest,
+// because the address list is only ever the input to the Boliga scrape: a newly
+// registered address has nothing to contribute to comps until it has sold and
+// the deed has been registered, which is itself weeks. A month of drift sits
+// inside the lag the sales data already carries. Shorter than that only buys
+// back lag nobody observes, and it is not free: the cache key is the exact
+// coordinate and radius, so every searched point refreshes separately, and one
+// refresh in a dense area is three chained DAR queries each walked a page of
+// darMaxNodes at a time (see darPostAll).
+const darRadiusMaxAge = 28 * 24 * time.Hour
+
 func (d DARNearbySearch) MaxAge() time.Duration {
-	return 365 * 24 * time.Hour
+	return darRadiusMaxAge
 }
 
 // Fetch runs the three-step DAR GraphQL radius search and returns the matching
