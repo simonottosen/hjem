@@ -138,3 +138,71 @@ func TestFetchedAddressesAreStampedInBatches(t *testing.T) {
 			writes, count, limit)
 	}
 }
+
+// Asking for two ranges at once hands FetchSales the inner addresses twice, as
+// two structs sharing a row: constructRanges searches DAR once per range and
+// the circles nest. Batching the stamps made that a correctness problem rather
+// than a wasted write — Postgres aborts an ON CONFLICT DO UPDATE that would
+// touch one row twice in a statement, so the lookup would die against the
+// deployment while passing here.
+//
+// Asserting on the statement rather than on the stored row, because SQLite
+// accepts the duplicate: reading the address back afterwards looks identical
+// either way, and the engine that refuses it is not the one under test.
+func TestOverlappingRangesWriteEachAddressOnce(t *testing.T) {
+	addrs := []*Address{
+		{DawaUUID: "uuid-sold", DawaID: "Gade 1", StreetName: "Gade", StreetNumber: "1",
+			PostalCode: "1666", MunicipalityCode: "101"},
+		{DawaUUID: "uuid-quiet", DawaID: "Gade 2", StreetName: "Gade", StreetNumber: "2",
+			PostalCode: "1666", MunicipalityCode: "101"},
+	}
+	bc := seedCacher(t, addrs)
+
+	// What the second, wider range contributes: the same row, loaded again into
+	// a struct of its own. The sale below can only match one of the two, since
+	// the match map is keyed by address string, so the other reaches the write
+	// through the stamping loop.
+	alsoInWiderRange := *addrs[0]
+	input := []*Address{addrs[0], addrs[1], &alsoInWiderRange}
+
+	var stmts []string
+	bc.db = bc.db.Session(&gorm.Session{Logger: sqlRecorder{&stmts}})
+
+	fetch := func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		return []BoligaSaleItem{{
+			Addr: addrs[0].Short(), SaleType: "Alm. Salg", AmountDKK: 3_000_000,
+			SqMeters: 84, Rooms: 3, BuildYear: 1932, PropertyType: PropertyApartment,
+			SoldDate: time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC),
+		}}, nil, nil
+	}
+
+	if _, _, err := bc.FetchSales(input, NewProgress(), NewHealthStats(), fetch); err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+
+	var insert string
+	for _, s := range stmts {
+		if strings.HasPrefix(s, "INSERT") && strings.Contains(s, "addresses") {
+			insert = s
+			break
+		}
+	}
+	if insert == "" {
+		t.Fatal("no insert into addresses was recorded")
+	}
+	if n := strings.Count(insert, "uuid-sold"); n != 1 {
+		t.Errorf("the duplicated address appears %d times in one upsert, want 1 — Postgres aborts the lookup on the second", n)
+	}
+
+	// The copy that survived has to be the matched one. Dropping the duplicate
+	// by keeping whichever arrived last would write the bare struct over the
+	// sale's metadata and lose it.
+	var stored Address
+	if err := bc.db.Where("dawa_uuid = ?", "uuid-sold").First(&stored).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if stored.BoligaBuildingSize != 84 || stored.BoligaRooms != 3 {
+		t.Errorf("stored %dm² and %d rooms, want 84 and 3 — the unmatched copy won the upsert",
+			stored.BoligaBuildingSize, stored.BoligaRooms)
+	}
+}

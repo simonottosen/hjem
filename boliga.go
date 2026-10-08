@@ -199,6 +199,32 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 			}
 		}
 
+		// A lookup asking for more than one range holds every inner address
+		// twice: constructRanges answers each range with its own DAR search and
+		// its own freshly loaded structs, and the circles nest, so the same row
+		// arrives under two pointers. Only one of them can match — the match
+		// map is keyed by address string — leaving its twin to the stamping
+		// loop above, and the two land in this slice as separate rows sharing
+		// an id. Writing them one at a time tolerated that: the second Save
+		// simply overwrote the first. One upsert cannot, because Postgres
+		// rejects an ON CONFLICT DO UPDATE that would touch a row twice in the
+		// same statement, and the whole lookup dies with it. SQLite accepts the
+		// duplicate, so this would only ever have failed in the deployment.
+		//
+		// Keeping the first copy keeps the right one: the matched address is
+		// appended by the loop above the stamping loop, so it is already here
+		// by the time its bare twin arrives, and the metadata is preserved.
+		seen := make(map[uint]bool, len(addrsToStore))
+		uniqueAddrs := addrsToStore[:0]
+		for _, addr := range addrsToStore {
+			if seen[addr.ID] {
+				continue
+			}
+			seen[addr.ID] = true
+			uniqueAddrs = append(uniqueAddrs, addr)
+		}
+		addrsToStore = uniqueAddrs
+
 		// A dense first lookup stamps some 2900 addresses, and a statement each
 		// is merely slow against SQLite but a network round-trip each against
 		// the Postgres deployment. These rows all exist already, yet each
