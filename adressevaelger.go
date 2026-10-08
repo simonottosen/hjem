@@ -296,8 +296,16 @@ func (a AVFuzzySearch) Request() *http.Request {
 	return req
 }
 
+// avFuzzyMaxAge stays a year because what is cached here is a resolution, not a
+// survey: the text a user typed names one address, and that address resolves to
+// the same DAR id next year. The answer that does go stale — a query that
+// resolved to nothing — is never written to the cache at all, so it cannot be
+// pinned by this. A radius search caches a set rather than an identity and has
+// its own, much shorter, maximum age.
+const avFuzzyMaxAge = 365 * 24 * time.Hour
+
 func (a AVFuzzySearch) MaxAge() time.Duration {
-	return 365 * 24 * time.Hour
+	return avFuzzyMaxAge
 }
 
 // avSoegID runs a phonetic search and returns the id of the top-ranked
