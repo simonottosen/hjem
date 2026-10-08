@@ -425,14 +425,26 @@ func matchSalesToAddrs(addrs []*Address, totalSales []BoligaSaleItem) [][]Boliga
 	// in the same building creates false duplicates.
 	z := map[string]int{}
 	zNorm := map[string]int{}
+	// Not a third matching attempt — the no-building-fallback rule above still
+	// holds. This only answers, for a sale that matched nothing, whether the
+	// building it stands on was inside the radius at all.
+	inRadius := map[string]bool{}
 	for i, addr := range addrs {
 		short := addr.Short()
 		z[short] = i
 		zNorm[normalizeAddr(short)] = i
+		inRadius[buildingKey(short)] = true
 	}
 
-	var exactMatches, normMatches, skippedSaleType, missed int
-	missedStreets := map[string]string{}
+	// Two unrelated things, counted apart because only one of them is a
+	// defect. Boliga is queried per street and answers with the whole street
+	// while the radius covers only part of it, so a sale at a building we
+	// never held is the system working: we asked for the street, we got the
+	// street. A sale at a building we do hold is the opposite — something we
+	// could have valued went unattributed. Summed, the first buries the second
+	// and the line reads as wholesale data loss.
+	var exactMatches, normMatches, skippedSaleType, outsideRadius, mismatched int
+	mismatchStreets := map[string]string{}
 	result := make([][]BoligaSaleItem, len(addrs))
 	for i := range totalSales {
 		s := totalSales[i]
@@ -457,28 +469,33 @@ func matchSalesToAddrs(addrs []*Address, totalSales []BoligaSaleItem) [][]Boliga
 			continue
 		}
 
+		if !inRadius[buildingKey(s.Addr)] {
+			outsideRadius++
+			continue
+		}
+
 		// Dropped. Keep one example per street rather than the first few
 		// overall: totalSales is assembled street by street, so a first-N
 		// sample would come entirely from whichever street happened to be
 		// fetched first and would say nothing about the rest.
-		missed++
+		mismatched++
 		street, _ := avSplitStreet(s.Addr)
-		if _, seen := missedStreets[street]; !seen {
-			missedStreets[street] = s.Addr
+		if _, seen := mismatchStreets[street]; !seen {
+			mismatchStreets[street] = s.Addr
 		}
 	}
 	totalMatched := exactMatches + normMatches
-	log.Printf("Boliga matched %d exact + %d normalized = %d/%d sales (skipped %d non-alm. salg, %d unmatched)",
+	log.Printf("Boliga matched %d exact + %d normalized = %d/%d sales (skipped %d non-alm. salg, %d outside the radius as expected, %d unmatched at buildings inside it)",
 		exactMatches, normMatches,
-		totalMatched, len(totalSales), skippedSaleType, missed)
-	if missed > 0 {
-		examples := make([]string, 0, len(missedStreets))
-		for _, addr := range missedStreets {
+		totalMatched, len(totalSales), skippedSaleType, outsideRadius, mismatched)
+	if mismatched > 0 {
+		examples := make([]string, 0, len(mismatchStreets))
+		for _, addr := range mismatchStreets {
 			examples = append(examples, addr)
 		}
 		sort.Strings(examples)
-		log.Printf("Boliga unmatched %d sales across %d streets, one example each: %s",
-			missed, len(missedStreets), truncate(strings.Join(examples, ", "), 300))
+		log.Printf("Boliga could not match %d sales at buildings inside the radius, across %d streets, one example each: %s",
+			mismatched, len(mismatchStreets), truncate(strings.Join(examples, ", "), 300))
 	}
 
 	return result
@@ -686,6 +703,21 @@ func normalizeAddr(s string) string {
 	s = strings.ReplaceAll(s, ",", ", ")
 	s = whitespaceRun.ReplaceAllString(s, " ")
 	return s
+}
+
+// buildingKey reduces an address to the street and house number it stands on,
+// dropping any floor and door. A radius query returns every unit at a point
+// together, so a floor or a door can never be the reason an address lies
+// outside the radius while a house number further up the street routinely is.
+// Keying on the full address instead would make every unmatched flat look
+// geographically excluded.
+func buildingKey(addr string) string {
+	street, rest := avSplitStreet(addr)
+	number := rest
+	if i := strings.IndexAny(rest, ", "); i >= 0 {
+		number = rest[:i]
+	}
+	return normalizeAddr(street + " " + number)
 }
 
 func FilterAddressesByProperty(pt PropertyType, addrs []*Address, sales [][]Sale) ([]*Address, [][]Sale) {
