@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -138,10 +139,21 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// from the same client, or evicted for running implausibly long)
 	cancelled := func() bool { return sess.ctx.Err() != nil }
 
+	// Timed from entry to exit of each stage rather than around the call alone,
+	// so the figure covers the waiting too — Boliga's pacing and backoff are
+	// where a slow lookup actually goes, and they are inside these calls.
+	stageStart := time.Now()
+	endStage := func(stage string) {
+		now := time.Now()
+		s.stats.RecordStage(stage, now.Sub(stageStart))
+		stageStart = now
+	}
+
 	p.Update(StageDawa, "Søger adresse...", 0, 0)
 	addrs, err := s.dc.Do(AVFuzzySearch{
 		Query: query,
 	})
+	endStage("address")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
 		return
@@ -164,6 +176,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 
 	p.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
 	rangeMap, err := s.constructRanges(addr, ranges)
+	endStage("nearby")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
 		return
@@ -184,6 +197,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 
 	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
 	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess))
+	endStage("boliga")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
 		return
@@ -201,6 +215,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
 
 	luResp, err := FormatLookupResponse(addrs, rangeMap, sales, filter)
+	endStage("format")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
 		return
@@ -216,8 +231,28 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 		return
 	}
 
-	// Fetch Dingeo valuation via FlareSolverr if configured, otherwise direct (non-fatal)
-	luResp.Valuation, _ = FetchDingeoValuation(addr.DawaUUID)
+	// Fetch Dingeo valuation via FlareSolverr if configured, otherwise direct.
+	// A failure stays non-fatal — two estimates beat none — but it is kept
+	// apart from a property that genuinely has no public valuation, in the log,
+	// the metrics and the page alike. Collapsing the two is how Dingeo could be
+	// broken for every lookup for weeks with nothing anywhere saying so.
+	valuation, dingeoErr := FetchDingeoValuation(addr.DawaUUID)
+	switch {
+	case dingeoErr != nil:
+		luResp.ValuationUnavailable = true
+		if errors.Is(dingeoErr, ErrDingeoUnconfigured) {
+			s.stats.RecordDingeo("unconfigured")
+		} else {
+			s.stats.RecordDingeo("unavailable")
+		}
+		log.Printf("Dingeo valuation unavailable for %q: %v", query, dingeoErr)
+	case valuation == nil:
+		s.stats.RecordDingeo("none")
+	default:
+		luResp.Valuation = valuation
+		s.stats.RecordDingeo("ok")
+	}
+	endStage("dingeo")
 
 	// Store result and mark done
 	p.SetResult(luResp)
@@ -262,15 +297,22 @@ func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
 			return nil, nil, sess.ctx.Err()
 		}
 
-		if len(remaining) == 0 {
-			return clientSales, nil, nil
-		}
-
 		// Counted in streets, not sales: a street can legitimately have no sales
 		// at all, and judging by the sale count would turn that successful fetch
 		// into "the browser gave us nothing" — failing the whole lookup below
 		// over a street that was simply empty.
 		fetchedStreets := len(tasks) - len(remaining)
+
+		// Recorded before the early return, so a lookup the browser covered
+		// entirely — the best case this feature has — is not the one case
+		// missing from the ratio.
+		if stats != nil {
+			stats.RecordRelayStreets(fetchedStreets, len(tasks))
+		}
+
+		if len(remaining) == 0 {
+			return clientSales, nil, nil
+		}
 
 		serverSales, failures, err := fetchStreetsLocally(remaining, progress, stats)
 		if err != nil {
@@ -651,14 +693,20 @@ type SquareMeterPrices struct {
 }
 
 type LookupResponse struct {
-	PrimaryIndex  int               `json:"primary_idx"`
-	Addrs         []*Address        `json:"addresses"`
-	Sales         []*JSONSale       `json:"sales"`
-	Ranges        map[int][]int     `json:"ranges,omitempty"`
-	SquareMeters  SquareMeterPrices `json:"sqmeters"`
-	Valuation     *DingeoValuation  `json:"valuation,omitempty"`
-	CompsEstimate *CompsEstimate    `json:"comps_estimate,omitempty"`
-	Warnings      []string          `json:"warnings,omitempty"`
+	PrimaryIndex int               `json:"primary_idx"`
+	Addrs        []*Address        `json:"addresses"`
+	Sales        []*JSONSale       `json:"sales"`
+	Ranges       map[int][]int     `json:"ranges,omitempty"`
+	SquareMeters SquareMeterPrices `json:"sqmeters"`
+	Valuation    *DingeoValuation  `json:"valuation,omitempty"`
+	// ValuationUnavailable separates "we could not reach Dingeo" from the
+	// absent Valuation of a property that simply has no public valuation. The
+	// page shows three estimates; without this the first silently becomes the
+	// second and the reader has no way to know the number is missing rather
+	// than nonexistent.
+	ValuationUnavailable bool           `json:"valuation_unavailable,omitempty"`
+	CompsEstimate        *CompsEstimate `json:"comps_estimate,omitempty"`
+	Warnings             []string       `json:"warnings,omitempty"`
 }
 
 type JSONSale struct {

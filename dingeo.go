@@ -3,6 +3,7 @@ package hjem
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,15 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrDingeoUnconfigured marks a failure that is explained by this deployment
+// rather than by Dingeo. Without FLARESOLVERR_URL the direct request goes
+// straight into Cloudflare's bot check, so it fails for a reason an operator
+// already knows about and has chosen; filing those alongside genuine outages
+// would make an unconfigured instance look permanently broken and bury the
+// case worth paging on. It is a separate class from "no valuation exists"
+// because a valuation may well exist — we are simply not equipped to read it.
+var ErrDingeoUnconfigured = errors.New("dingeo: FlareSolverr not configured")
 
 type DingeoEstimate struct {
 	Name  string `json:"name"`
@@ -45,6 +55,9 @@ type flareSolverrResponse struct {
 	} `json:"solution"`
 }
 
+// A var so tests can point it at an httptest server, like boligaSoldSearchURL.
+var dingeoSmartVurderingURL = "https://www.dingeo.dk/_ah/api/bvsvurderingendpoint/v1/getSmartVurdering"
+
 func getFlareSolverrURL() string {
 	if url := os.Getenv("FLARESOLVERR_URL"); url != "" {
 		return url
@@ -52,13 +65,22 @@ func getFlareSolverrURL() string {
 	return "" // disabled by default
 }
 
+// FetchDingeoValuation reports three outcomes, and the caller has to be able to
+// tell them apart: a valuation, (nil, nil) for a property Dingeo knows about but
+// has no estimates for, and an error for everything that stopped us reading an
+// answer at all. They used to collapse into (nil, nil), which meant a Cloudflare
+// challenge, a missing FlareSolverr and an unlisted flat were one state —
+// Dingeo could be down for every lookup for weeks and the only visible symptom
+// was two estimate cards where three belong.
 func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
+	// Not an error: an address with no DAR id is not a Dingeo problem, and
+	// there is no key we could have asked under.
 	if dawaUUID == "" {
 		return nil, nil
 	}
 
 	endpoint := fmt.Sprintf(
-		"https://www.dingeo.dk/_ah/api/bvsvurderingendpoint/v1/getSmartVurdering?adresseid=%s",
+		dingeoSmartVurderingURL+"?adresseid=%s",
 		strings.ToUpper(dawaUUID),
 	)
 
@@ -70,13 +92,17 @@ func FetchDingeoValuation(dawaUUID string) (*DingeoValuation, error) {
 	}
 
 	// Direct request (works when not behind Cloudflare bot detection)
-	return fetchDingeoDirect(endpoint, dawaUUID)
+	val, err := fetchDingeoDirect(endpoint, dawaUUID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrDingeoUnconfigured, err)
+	}
+	return val, nil
 }
 
 func fetchDingeoDirect(endpoint, dawaUUID string) (*DingeoValuation, error) {
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: build request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
@@ -87,22 +113,27 @@ func fetchDingeoDirect(endpoint, dawaUUID string) (*DingeoValuation, error) {
 	log.Printf("Fetching Dingeo valuation (direct) for %s", dawaUUID)
 	resp, err := DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Dingeo request failed: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// Every non-200 is a failure, including 404. Dingeo answers an address it
+	// has nothing for with a 200 and countEvals 0, so a 404 here is the API
+	// having moved or Cloudflare standing in front of it — not a quiet way of
+	// saying the flat is unlisted.
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Dingeo returned status %d (direct)", resp.StatusCode)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: status %d", resp.StatusCode)
 	}
 
 	var val DingeoValuation
 	if err := json.NewDecoder(resp.Body).Decode(&val); err != nil {
-		log.Printf("Dingeo decode failed: %v", err)
-		return nil, nil
+		// A bot check answers 200 with HTML, so this is the usual shape of
+		// being blocked rather than a rare malformed payload.
+		return nil, fmt.Errorf("dingeo: decode: %w", err)
 	}
 
+	// The one genuine "no valuation exists": we reached Dingeo, it answered for
+	// this address, and the answer was that it holds no estimates.
 	if val.CountEvals == 0 {
 		log.Printf("Dingeo: no valuations available for %s", dawaUUID)
 		return nil, nil
@@ -135,32 +166,29 @@ func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*Di
 		MaxTimeout: 30000,
 	})
 	if err != nil {
-		log.Printf("FlareSolverr marshal failed: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: marshal FlareSolverr request: %w", err)
 	}
 
 	client := http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Post(flareSolverrURL+"/v1", "application/json", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("FlareSolverr request failed: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: FlareSolverr request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var fsResp flareSolverrResponse
 	if err := json.NewDecoder(resp.Body).Decode(&fsResp); err != nil {
-		log.Printf("FlareSolverr decode failed: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: decode FlareSolverr reply: %w", err)
 	}
 
+	// FlareSolverr itself failing — it could not solve the challenge, or the
+	// browser behind it died. Nothing was learned about the address.
 	if fsResp.Status != "ok" {
-		log.Printf("FlareSolverr error: %s", fsResp.Message)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: FlareSolverr: %s", fsResp.Message)
 	}
 
 	if fsResp.Solution.Status != 200 {
-		log.Printf("Dingeo returned status %d via FlareSolverr", fsResp.Solution.Status)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: status %d via FlareSolverr", fsResp.Solution.Status)
 	}
 
 	// FlareSolverr returns the page HTML. The JSON may be wrapped in HTML tags.
@@ -168,17 +196,17 @@ func fetchDingeoViaFlareSolverr(flareSolverrURL, endpoint, dawaUUID string) (*Di
 	rawResponse := fsResp.Solution.Response
 	jsonStr := extractJSON(rawResponse)
 	if jsonStr == "" {
-		log.Printf("Dingeo via FlareSolverr: no JSON found in response (length %d)", len(rawResponse))
+		// Reaching here with a 200 is the signature of a challenge page served
+		// in place of the API, so the preview is worth the log line.
 		if len(rawResponse) > 200 {
 			log.Printf("Dingeo response preview: %s", rawResponse[:200])
 		}
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: no JSON in FlareSolverr response (length %d)", len(rawResponse))
 	}
 
 	var val DingeoValuation
 	if err := json.NewDecoder(strings.NewReader(jsonStr)).Decode(&val); err != nil {
-		log.Printf("Dingeo decode (via FlareSolverr) failed: %v", err)
-		return nil, nil
+		return nil, fmt.Errorf("dingeo: decode via FlareSolverr: %w", err)
 	}
 
 	if val.CountEvals == 0 {
