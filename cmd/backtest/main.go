@@ -194,10 +194,9 @@ func latestYearMean(agg map[time.Time]hjem.Aggregation) float64 {
 // distanceKm stands in for DAR's radius filter, which is what narrows the
 // neighbour set in production. The coordinate columns are transposed —
 // Latitude holds the x/longitude DAR serves — so they are read back swapped
-// here. comps.go hands the same two columns to its haversine in declared
-// order, making its distance weight a different quantity; reproducing
-// production means leaving that as it is. Over a few hundred metres the
-// equirectangular form is accurate to millimetres.
+// here. The swap is spelled out rather than taken from addrLatLon because that
+// helper is unexported and this is a separate package. Over a few hundred
+// metres the equirectangular form is accurate to millimetres.
 func distanceKm(a, b *hjem.Address) float64 {
 	const earthRadiusKm = 6371.0
 	lat1, lat2 := a.Longtitude, b.Longtitude

@@ -67,8 +67,15 @@ func ComputeCompsEstimate(
 	primarySize := float64(primary.BoligaBuildingSize)
 	primaryRooms := float64(primary.BoligaRooms)
 	primaryBuildYear := float64(primary.BoligaBuiltYear)
-	primaryLat := primary.Latitude
-	primaryLon := primary.Longtitude
+	// Via addrLatLon because Address stores x in .Latitude and y in .Longtitude.
+	// Read at face value the two points are still consistent with each other, so
+	// this produced a plausible number rather than an obvious one: what it got
+	// wrong was the cos(lat) term that shrinks a degree of longitude, evaluated
+	// at Copenhagen's 12.5°E instead of its 55.7°N. East-west separation came
+	// out 1.77x too large and north-south about right, so a comp 250 m along the
+	// street was weighted as one 450 m away while its neighbour behind the
+	// building was weighted correctly.
+	primaryLat, primaryLon := addrLatLon(*primary)
 
 	var candidates []compCandidate
 
@@ -139,7 +146,8 @@ func ComputeCompsEstimate(
 
 		// Geographic distance
 		addr := addrs[s.AddrIndex]
-		dist := haversineKm(primaryLat, primaryLon, addr.Latitude, addr.Longtitude)
+		lat, lon := addrLatLon(*addr)
+		dist := haversineKm(primaryLat, primaryLon, lat, lon)
 		wDist := 1.0 / (1.0 + dist/distHalf)
 
 		weight := wTime * wSize * wRooms * wAge * wDist

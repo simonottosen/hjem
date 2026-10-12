@@ -100,6 +100,18 @@ function gaussian(x: number, sigma: number): number {
   return Math.exp(-(x * x) / (2 * sigma * sigma));
 }
 
+// addrLatLon mirrors the Go helper of the same name. The `lat` and `long` the
+// server serializes are the Address columns of those names, and those hold DAR's
+// x and y the other way round — x, the longitude, is in `lat`. Taking them at
+// face value leaves both points consistent with each other, so the distance that
+// comes out is plausible rather than obviously wrong: what breaks is the cos(lat)
+// term shrinking a degree of longitude, evaluated at Copenhagen's 12.5°E instead
+// of its 55.7°N, which stretches east-west separation by 1.77x and leaves
+// north-south about right.
+function addrLatLon(a: Address | undefined): [number, number] {
+  return [a?.long ?? 0, a?.lat ?? 0];
+}
+
 export function haversineKm(
   lat1: number,
   lon1: number,
@@ -164,8 +176,7 @@ export function computeCompsEstimate(
   const primarySize = primary.building_size;
   const primaryRooms = primary.rooms;
   const primaryBuildYear = primary.built_year;
-  const primaryLat = primary.lat;
-  const primaryLon = primary.long;
+  const [primaryLat, primaryLon] = addrLatLon(primary);
 
   interface Candidate {
     adjustedSqmPrice: number;
@@ -214,7 +225,8 @@ export function computeCompsEstimate(
       wAge = gaussian(saleBuildYear - primaryBuildYear, AGE_SIGMA);
     }
 
-    const dist = haversineKm(primaryLat, primaryLon, addr?.lat ?? 0, addr?.long ?? 0);
+    const [lat, lon] = addrLatLon(addr);
+    const dist = haversineKm(primaryLat, primaryLon, lat, lon);
     const wDist = 1.0 / (1.0 + dist / DIST_HALF);
 
     const weight = wTime * wSize * wRooms * wAge * wDist;
