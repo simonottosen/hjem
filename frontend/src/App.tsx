@@ -70,8 +70,8 @@ export default function App() {
     setHasSearched(true);
     setExcludedAddrs(new Set());
     reset();
-    search(query, Number(range), Number(filter), (lookupId) => {
-      startPolling(lookupId, setResult, setSearchError);
+    search(query, Number(range), Number(filter), (session) => {
+      startPolling(session, setResult, setSearchError);
     });
   }, [query, range, filter, search, reset, startPolling, setResult, setSearchError]);
 

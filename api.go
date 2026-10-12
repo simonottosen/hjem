@@ -2,6 +2,7 @@ package hjem
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"embed"
 	"encoding/csv"
 	"encoding/json"
@@ -107,6 +108,15 @@ func (s *server) handleLookup() http.HandlerFunc {
 			return
 		}
 
+		// Checked before a session exists rather than after: one created and
+		// then refused would hold a slot under maxActiveSessions as an
+		// in-flight lookup that never runs, for the whole half hour until the
+		// overrun valve cancels it.
+		if err := s.sessions.Admit(clientKey(r)); err != nil {
+			replyJSONErr(w, err, http.StatusTooManyRequests)
+			return
+		}
+
 		sess, err := s.sessions.Create(req.PreviousID)
 		if err != nil {
 			replyJSONErr(w, err, http.StatusTooManyRequests)
@@ -120,8 +130,9 @@ func (s *server) handleLookup() http.HandlerFunc {
 
 		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]string{
-			"status":    "accepted",
-			"lookup_id": sess.ID,
+			"status":       "accepted",
+			"lookup_id":    sess.ID,
+			"ingest_token": sess.Token,
 		})
 	}
 }
@@ -387,6 +398,7 @@ func acceptBoligaIngest(ing *BoligaIngest, tasks []BoligaPropertyRequest, stats 
 // could spend the server's memory without holding one.
 type boligaIngestEnvelope struct {
 	LookupID string          `json:"lookup_id"`
+	Token    string          `json:"ingest_token"`
 	Fetched  json.RawMessage `json:"fetched"`
 	Failed   json.RawMessage `json:"failed"`
 }
@@ -466,6 +478,16 @@ func (s *server) handleBoligaIngest() http.HandlerFunc {
 		sess, ok := s.sessions.Get(env.LookupID)
 		if !ok {
 			replyJSONErr(w, ErrUnknownSession, http.StatusNotFound)
+			return
+		}
+
+		// Answered apart from the unknown-id case on purpose: the browser can
+		// act on neither, but the two say different things to whoever reads
+		// the logs — a stale tab, versus a caller holding an id without the
+		// token that goes with it. Constant time because a comparison that
+		// stops at the first wrong byte reports how much of a guess was right.
+		if subtle.ConstantTimeCompare([]byte(env.Token), []byte(sess.Token)) != 1 {
+			replyJSONErr(w, ErrWrongIngestToken, http.StatusForbidden)
 			return
 		}
 

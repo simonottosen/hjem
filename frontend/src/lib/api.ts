@@ -10,6 +10,14 @@ export class SessionGoneError extends Error {
   }
 }
 
+// What POST /api/lookup hands back. The id is public by necessity — it is in
+// every progress URL — so the ingest token is what proves a later upload comes
+// from the browser that started the lookup, and the two travel together.
+export interface LookupSession {
+  lookupId: string;
+  ingestToken: string;
+}
+
 // Start a lookup job on the server (returns immediately) and return its id.
 // previousLookupId, when we have one, tells the server to cancel our own
 // earlier lookup — and only ours.
@@ -18,7 +26,7 @@ export async function startLookup(
   range: number,
   filter: number,
   previousLookupId: string | null
-): Promise<string> {
+): Promise<LookupSession> {
   const resp = await fetch("/api/lookup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -36,18 +44,18 @@ export async function startLookup(
     throw new Error(data.error || `Server error ${resp.status}`);
   }
 
-  const { lookup_id: lookupId } = await resp.json();
+  const { lookup_id: lookupId, ingest_token: ingestToken } = await resp.json();
   if (!lookupId) {
     throw new Error("Serveren returnerede ikke et lookup-id");
   }
-  return lookupId as string;
+  return { lookupId, ingestToken } as LookupSession;
 }
 
 // Hand the streets we fetched back to the lookup that asked for them. The
 // server treats anything missing as failed and fetches it itself, so a failure
 // here costs latency but never results — hence no throw.
 export async function postBoligaIngest(
-  lookupId: string,
+  session: LookupSession,
   outcome: BoligaRelayOutcome
 ): Promise<void> {
   try {
@@ -55,7 +63,8 @@ export async function postBoligaIngest(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        lookup_id: lookupId,
+        lookup_id: session.lookupId,
+        ingest_token: session.ingestToken,
         fetched: outcome.fetched,
         failed: outcome.failed,
       }),
