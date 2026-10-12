@@ -3,11 +3,18 @@ package hjem
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type refusingCacher struct{}
+
+func (refusingCacher) Do(DawaRequest) ([]*Address, error) {
+	return nil, errors.New("no address service in this test")
+}
 
 // newTestStore returns a store on a frozen clock so age-based behaviour can be
 // exercised without sleeping.
@@ -238,6 +245,129 @@ func TestHandleProgressRejectsUnknownID(t *testing.T) {
 		if rec.Code != 404 {
 			t.Errorf("id %q: got status %d, want 404", id, rec.Code)
 		}
+	}
+}
+
+// The hole a concurrency count alone leaves: a lookup that fails in
+// milliseconds releases its slot immediately, so a client looping fast
+// failures is never once seen holding more than one. Charging on starts is
+// what makes the budget bind on it.
+func TestClientBudgetSurvivesFastFailingLookups(t *testing.T) {
+	st, _ := newTestStore()
+
+	for i := 0; i < st.maxClient; i++ {
+		if err := st.Admit("198.51.100.7"); err != nil {
+			t.Fatalf("lookup %d of %d: %v", i+1, st.maxClient, err)
+		}
+		sess, err := st.Create("")
+		if err != nil {
+			t.Fatalf("Create %d: %v", i+1, err)
+		}
+		// Failed and gone: both the slot and, were the count taken from the
+		// map, the client's whole history with it.
+		sess.Progress.Update(StageError, "no found address", 0, 0)
+	}
+
+	if err := st.Admit("198.51.100.7"); !errors.Is(err, ErrTooManyClientLookups) {
+		t.Fatalf("over the client budget: got err %v, want ErrTooManyClientLookups", err)
+	}
+	if n := st.countActiveLocked(); n != 0 {
+		t.Fatalf("%d sessions still active; the budget has to bind without them", n)
+	}
+}
+
+// A client that replaces its own lookup deletes that session from the store,
+// which is the other way a map-derived count would be reset — by a parameter
+// the caller chooses.
+func TestClientBudgetSurvivesSelfReplacement(t *testing.T) {
+	st, _ := newTestStore()
+
+	previous := ""
+	for i := 0; i < st.maxClient; i++ {
+		if err := st.Admit("198.51.100.7"); err != nil {
+			t.Fatalf("lookup %d of %d: %v", i+1, st.maxClient, err)
+		}
+		sess, err := st.Create(previous)
+		if err != nil {
+			t.Fatalf("Create %d: %v", i+1, err)
+		}
+		previous = sess.ID
+	}
+
+	if err := st.Admit("198.51.100.7"); !errors.Is(err, ErrTooManyClientLookups) {
+		t.Fatalf("got err %v, want ErrTooManyClientLookups", err)
+	}
+}
+
+func TestClientBudgetRefillsAfterWindow(t *testing.T) {
+	st, clock := newTestStore()
+
+	for i := 0; i < st.maxClient; i++ {
+		if err := st.Admit("198.51.100.7"); err != nil {
+			t.Fatalf("lookup %d: %v", i+1, err)
+		}
+	}
+	if err := st.Admit("203.0.113.9"); err != nil {
+		t.Fatalf("a second client was refused: %v", err)
+	}
+
+	*clock = clock.Add(st.clientWindow)
+	if err := st.Admit("198.51.100.7"); err != nil {
+		t.Fatalf("still refused a whole window later: %v", err)
+	}
+
+	// Expired starts are dropped rather than merely ignored, and a client that
+	// has gone quiet stops being held at all: nothing else ever revisits this
+	// map, so what it keeps here it keeps for as long as the process lives.
+	if n := len(st.clientStarts["198.51.100.7"]); n != 1 {
+		t.Errorf("%d starts retained, want only the one inside the window", n)
+	}
+	if _, ok := st.clientStarts["203.0.113.9"]; ok {
+		t.Error("a client whose window has passed is still held")
+	}
+}
+
+// Below maxActiveSessions by enough that no single client can fill the pool
+// and leave everyone else a 429.
+func TestClientBudgetIsBelowTheGlobalCap(t *testing.T) {
+	st, _ := newTestStore()
+
+	if st.maxClient >= st.maxActive {
+		t.Fatalf("per-client cap %d does not bind below the global cap %d", st.maxClient, st.maxActive)
+	}
+}
+
+func TestHandleLookupRejectsOverClientBudget(t *testing.T) {
+	// An accepted lookup runs for real in a goroutine, so it needs something
+	// to ask for the address — which here refuses, ending the lookup at its
+	// first stage.
+	s := &server{sessions: newSessionStore(), dc: refusingCacher{}, stats: NewHealthStats()}
+
+	post := func() int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/lookup", strings.NewReader(`{"q":"x","ranges":[100]}`))
+		req.RemoteAddr = "198.51.100.7:51000"
+		s.handleLookup()(rec, req)
+		return rec.Code
+	}
+
+	for i := 0; i < s.sessions.maxClient; i++ {
+		if code := post(); code != http.StatusAccepted {
+			t.Fatalf("lookup %d: status %d, want 202", i+1, code)
+		}
+	}
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("status %d, want 429 once one client is over its budget", code)
+	}
+
+	// The global pool is nowhere near full, so a different client must still
+	// be served.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/lookup", strings.NewReader(`{"q":"x","ranges":[100]}`))
+	req.RemoteAddr = "203.0.113.9:51000"
+	s.handleLookup()(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second client got status %d, want 202", rec.Code)
 	}
 }
 

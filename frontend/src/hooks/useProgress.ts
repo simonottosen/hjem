@@ -1,6 +1,11 @@
 import { useState, useCallback, useRef } from "react";
 import type { MapProgress, ProgressEvent, LookupResponse } from "@/lib/types";
-import { fetchProgress, postBoligaIngest, SessionGoneError } from "@/lib/api";
+import {
+  fetchProgress,
+  postBoligaIngest,
+  SessionGoneError,
+  type LookupSession,
+} from "@/lib/api";
 import { runBoligaTasks, streetKey } from "@/lib/boliga";
 
 const POLL_INTERVAL_MS = 2000;
@@ -52,7 +57,7 @@ export function useProgress() {
 
   const startPolling = useCallback(
     (
-      lookupId: string,
+      session: LookupSession,
       onResult: (data: LookupResponse) => void,
       onError: (msg: string) => void
     ) => {
@@ -80,7 +85,7 @@ export function useProgress() {
       const poll = async () => {
         let data: ProgressEvent;
         try {
-          data = await fetchProgress(lookupId);
+          data = await fetchProgress(session.lookupId);
         } catch (err) {
           if (!current()) return;
           if (err instanceof SessionGoneError) {
@@ -137,7 +142,7 @@ export function useProgress() {
             // already aborted the relay, so the outcome is a partial one for a
             // lookup no one is waiting on.
             .then((outcome) => {
-              if (current()) postBoligaIngest(lookupId, outcome);
+              if (current()) postBoligaIngest(session, outcome);
             })
             .catch((err) => console.warn("[hjem] Boliga relay failed:", err));
         }

@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import type { LookupResponse } from "@/lib/types";
-import { startLookup } from "@/lib/api";
+import { startLookup, type LookupSession } from "@/lib/api";
 
 export function useSearch() {
   const [data, setData] = useState<LookupResponse | null>(null);
@@ -15,16 +15,16 @@ export function useSearch() {
       query: string,
       range: number,
       filter: number,
-      onStarted: (lookupId: string) => void
+      onStarted: (session: LookupSession) => void
     ) => {
       setIsLoading(true);
       setError(null);
       setData(null);
 
       try {
-        const lookupId = await startLookup(query, range, filter, lookupIdRef.current);
-        lookupIdRef.current = lookupId;
-        onStarted(lookupId); // Signal that polling should begin
+        const session = await startLookup(query, range, filter, lookupIdRef.current);
+        lookupIdRef.current = session.lookupId;
+        onStarted(session); // Signal that polling should begin
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
         setIsLoading(false);
