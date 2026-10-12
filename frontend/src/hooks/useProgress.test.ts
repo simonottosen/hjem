@@ -59,8 +59,12 @@ it("ignores a poll that resolves after its search was replaced", async () => {
 
   // Clearing the interval is what stop() does about the *next* poll; this one
   // is already in flight and will resolve regardless.
-  act(() => result.current.startPolling("old", staleResult, () => {}));
-  act(() => result.current.startPolling("new", freshResult, () => {}));
+  act(() =>
+    result.current.startPolling({ lookupId: "old", ingestToken: "t1" }, staleResult, () => {})
+  );
+  act(() =>
+    result.current.startPolling({ lookupId: "new", ingestToken: "t2" }, freshResult, () => {})
+  );
 
   await act(async () => fresh.settle(event({ message: "new" })));
   expect(result.current.progress?.message).toBe("new");

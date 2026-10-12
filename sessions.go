@@ -32,14 +32,36 @@ const (
 	// newest. Finished sessions do not count against it: they hold memory
 	// until the TTL evicts them, but they no longer do work.
 	maxActiveSessions = 8
+
+	// maxClientLookups caps how many lookups one client may start within
+	// clientLookupWindow. maxActiveSessions bounds the work in flight but not
+	// whose it is: eight POSTs from a single loop leave every other visitor a
+	// 429, and each lookup also spends thousands of outbound requests under
+	// our IP and our Adressevælger token.
+	//
+	// Counted on starts inside a window rather than on sessions still running,
+	// because a lookup that fails early — an address nobody can resolve, DAR
+	// unreachable — finishes in milliseconds and hands its slot straight back.
+	// A cap on concurrency alone would therefore not bind at all on the loop
+	// that is cheapest to run. The window is wider than the slowest lookup
+	// measured (~4 minutes), so it bounds concurrency as a side effect: three
+	// starts in five minutes cannot become a fourth live lookup.
+	//
+	// A lookup that fails costs the same budget as one that succeeds. At the
+	// moment of admission there is nothing to tell the two apart, and
+	// refunding the cheap failures afterwards would exempt precisely the loop
+	// this exists to stop.
+	maxClientLookups   = 3
+	clientLookupWindow = 5 * time.Minute
 )
 
 var (
-	// ErrTooManySessions and ErrUnknownSession are returned to the browser as
-	// the error text of a 429 and a 404, so they are phrased in Danish like
-	// the progress messages.
-	ErrTooManySessions = errors.New("for mange samtidige søgninger — prøv igen om et øjeblik")
-	ErrUnknownSession  = errors.New("ukendt eller udløbet søgning")
+	// These reach the browser as the error text of a 429, a 404 and a 403, so
+	// they are phrased in Danish like the progress messages.
+	ErrTooManySessions      = errors.New("for mange samtidige søgninger — prøv igen om et øjeblik")
+	ErrTooManyClientLookups = errors.New("for mange søgninger fra denne forbindelse — prøv igen om et par minutter")
+	ErrUnknownSession       = errors.New("ukendt eller udløbet søgning")
+	ErrWrongIngestToken     = errors.New("uploaden hører ikke til denne søgning")
 )
 
 // lookupSession is the state of one lookup: previously the server held a
@@ -47,7 +69,16 @@ var (
 // cancelled the first user's lookup and overwrote their progress. Giving each
 // lookup its own means concurrent users no longer interfere.
 type lookupSession struct {
-	ID        string
+	ID string
+
+	// Token is what proves a Boliga upload came from the browser that started
+	// this lookup. The id cannot: it travels in every progress-poll URL and
+	// sits in client-side JS, so anyone who sees one could otherwise post
+	// fabricated sales into a stranger's valuation, where they would be
+	// counted in the comps estimate. The token is handed out once, in the
+	// response to the POST that starts the lookup, and never echoed again.
+	Token string
+
 	Progress  *Progress
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -103,20 +134,73 @@ type sessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*lookupSession
 
-	finishedTTL time.Duration
-	maxDuration time.Duration
-	maxActive   int
-	now         func() time.Time
+	// clientStarts holds, per client, when that client's recent lookups began.
+	// Deliberately not derived from the sessions map: Create deletes the
+	// caller's own previous session when asked to, and finished ones are
+	// evicted once their TTL runs out, so a count taken from the map would be
+	// reset both by a parameter the client chooses and by waiting.
+	clientStarts map[string][]time.Time
+
+	finishedTTL  time.Duration
+	maxDuration  time.Duration
+	maxActive    int
+	maxClient    int
+	clientWindow time.Duration
+	now          func() time.Time
 }
 
 func newSessionStore() *sessionStore {
 	return &sessionStore{
-		sessions:    map[string]*lookupSession{},
-		finishedTTL: finishedSessionTTL,
-		maxDuration: maxLookupDuration,
-		maxActive:   maxActiveSessions,
-		now:         time.Now,
+		sessions:     map[string]*lookupSession{},
+		clientStarts: map[string][]time.Time{},
+		finishedTTL:  finishedSessionTTL,
+		maxDuration:  maxLookupDuration,
+		maxActive:    maxActiveSessions,
+		maxClient:    maxClientLookups,
+		clientWindow: clientLookupWindow,
+		now:          time.Now,
 	}
+}
+
+// Admit charges a lookup to client and reports whether that client still has
+// budget for it. Charged on the attempt rather than on the session that
+// follows, so a client hammering an already full server pays for the attempts
+// it is being turned away on too.
+func (st *sessionStore) Admit(client string) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	now := st.now()
+	cutoff := now.Add(-st.clientWindow)
+	// Every client, not only this one. Like evictLocked, the map is cleaned
+	// when it is touched: a client that has gone away has no other moment at
+	// which its entry could be dropped.
+	for key, starts := range st.clientStarts {
+		if kept := startsAfter(starts, cutoff); len(kept) > 0 {
+			st.clientStarts[key] = kept
+		} else {
+			delete(st.clientStarts, key)
+		}
+	}
+
+	starts := st.clientStarts[client]
+	if len(starts) >= st.maxClient {
+		return fmt.Errorf("%w (%d inden for %s)", ErrTooManyClientLookups, len(starts), st.clientWindow)
+	}
+	st.clientStarts[client] = append(starts, now)
+
+	return nil
+}
+
+// startsAfter drops the starts at or before cutoff. Appended in order, so the
+// first one still inside the window is where the rest of them begin.
+func startsAfter(starts []time.Time, cutoff time.Time) []time.Time {
+	for i, t := range starts {
+		if t.After(cutoff) {
+			return starts[i:]
+		}
+	}
+	return nil
 }
 
 // Create registers a new session. previousID, when it names a live session,
@@ -146,6 +230,7 @@ func (st *sessionStore) Create(previousID string) (*lookupSession, error) {
 	p.now = st.now
 	sess := &lookupSession{
 		ID:           newSessionID(),
+		Token:        newSessionID(),
 		Progress:     p,
 		ctx:          ctx,
 		cancel:       cancel,
