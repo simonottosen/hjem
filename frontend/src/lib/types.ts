@@ -70,6 +70,10 @@ export interface LookupResponse {
   ranges: Record<number, number[]> | null;
   sqmeters: SquareMeterPrices;
   valuation?: DingeoValuation | null;
+  // Set when the public valuation could not be fetched, as opposed to a
+  // property that has none. Both leave `valuation` absent, and the page must
+  // not present the first as the second.
+  valuation_unavailable?: boolean;
   comps_estimate?: CompsEstimate | null;
   warnings?: string[];
   error?: string;
