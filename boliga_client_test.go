@@ -265,7 +265,7 @@ func TestBoligaIngestHandler(t *testing.T) {
 	})
 
 	t.Run("accepted once then ignored", func(t *testing.T) {
-		body := fmt.Sprintf(`{"lookup_id":%q,"fetched":[]}`, sess.ID)
+		body := fmt.Sprintf(`{"lookup_id":%q,"ingest_token":%q,"fetched":[]}`, sess.ID, sess.Token)
 		if rec := post(body); rec.Code != http.StatusAccepted {
 			t.Fatalf("status %d, want 202", rec.Code)
 		}
@@ -455,7 +455,7 @@ func TestIngestRefusedAfterRelayCloses(t *testing.T) {
 	s.clientStreetFetcher(sess)([]BoligaPropertyRequest{task("Vestergade", 1456)}, sess.Progress, s.stats)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/boliga/ingest",
-		bytes.NewBufferString(fmt.Sprintf(`{"lookup_id":%q,"fetched":[]}`, sess.ID)))
+		bytes.NewBufferString(fmt.Sprintf(`{"lookup_id":%q,"ingest_token":%q,"fetched":[]}`, sess.ID, sess.Token)))
 	rec := httptest.NewRecorder()
 	s.handleBoligaIngest()(rec, req)
 
@@ -469,10 +469,10 @@ func TestIngestRefusedAfterRelayCloses(t *testing.T) {
 
 // bloatedIngest is the cheapest body that decodes into the most memory: a
 // BoligaSaleItem is 184 bytes and `{},` is three.
-func bloatedIngest(lookupID string, sales int) string {
+func bloatedIngest(lookupID, token string, sales int) string {
 	elems := strings.Repeat("{},", sales)
-	return fmt.Sprintf(`{"lookup_id":%q,"fetched":[{"task":{},"sales":[%s]}]}`,
-		lookupID, elems[:len(elems)-1])
+	return fmt.Sprintf(`{"lookup_id":%q,"ingest_token":%q,"fetched":[{"task":{},"sales":[%s]}]}`,
+		lookupID, token, elems[:len(elems)-1])
 }
 
 // The byte limit bounds the request, not what it decodes into — measured at
@@ -494,20 +494,20 @@ func TestIngestBoundsDecodedSize(t *testing.T) {
 	}
 
 	t.Run("over the sale cap", func(t *testing.T) {
-		if rec := post(bloatedIngest(sess.ID, maxBoligaIngestSales+1)); rec.Code != http.StatusBadRequest {
+		if rec := post(bloatedIngest(sess.ID, sess.Token, maxBoligaIngestSales+1)); rec.Code != http.StatusBadRequest {
 			t.Errorf("status %d, want 400", rec.Code)
 		}
 	})
 
 	t.Run("a real lookup still fits", func(t *testing.T) {
 		// The densest search observed returned 2229 sales.
-		if rec := post(bloatedIngest(sess.ID, 2229)); rec.Code != http.StatusAccepted {
+		if rec := post(bloatedIngest(sess.ID, sess.Token, 2229)); rec.Code != http.StatusAccepted {
 			t.Errorf("status %d, want 202 — the cap must not reject real lookups", rec.Code)
 		}
 	})
 
 	t.Run("unknown lookup id expands nothing", func(t *testing.T) {
-		body := bloatedIngest("deadbeef", 500_000)
+		body := bloatedIngest("deadbeef", sess.Token, 500_000)
 
 		var before, after runtime.MemStats
 		runtime.GC()
