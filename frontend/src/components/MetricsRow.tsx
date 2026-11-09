@@ -50,6 +50,11 @@ export function MetricsRow({ data }: MetricsRowProps) {
   const primary = addrs[data.primary_idx];
   const valuation = data.valuation;
   const comps = data.comps_estimate;
+  const hasValuation = !!valuation && valuation.includedEvals?.length > 0;
+  // A fetch that failed and a property with no public valuation both arrive as
+  // an absent `valuation`. Rendering them the same way is what made a broken
+  // Dingeo look like an ordinary two-estimate result.
+  const valuationUnavailable = !!data.valuation_unavailable;
 
   // Primary address sales (sorted newest first)
   const primarySales = useMemo(() => {
@@ -224,7 +229,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
             </div>
 
             {/* Secondary estimates: collapsible on mobile, always visible on sm+ */}
-            {(sqmProjectedValue || (valuation && valuation.includedEvals?.length > 0)) && (
+            {(sqmProjectedValue || hasValuation || valuationUnavailable) && (
               <>
                 {/* Toggle button — mobile only */}
                 <button
@@ -257,8 +262,25 @@ export function MetricsRow({ data }: MetricsRowProps) {
                       </div>
                     )}
 
+                    {/* Public valuation could not be fetched */}
+                    {valuationUnavailable && (
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium inline-flex items-center gap-1">
+                          Gns. offentlige vurderinger
+                          <InfoTip text="Gennemsnit af offentligt tilgængelige vurderinger fra bl.a. Skat, Realkredit, Geomatics AVM og Vertex AI. Kilden svarede ikke denne gang — tallet mangler, og boligen har ikke nødvendigvis ingen offentlig vurdering." />
+                        </p>
+                        <p className="text-base font-semibold text-muted-foreground inline-flex items-center gap-1.5">
+                          <AlertTriangle className="size-3.5 text-amber-600" />
+                          Ikke tilgængelig
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Kunne ikke hentes
+                        </p>
+                      </div>
+                    )}
+
                     {/* Average of public valuations */}
-                    {valuation && valuation.includedEvals?.length > 0 && (() => {
+                    {hasValuation && (() => {
                       const included = valuation.includedEvals;
                       const dingeoMean = Math.round(
                         included.reduce((sum, e) => sum + e.value, 0) / included.length
@@ -319,7 +341,7 @@ export function MetricsRow({ data }: MetricsRowProps) {
       </div>
 
       {/* Dingeo estimates detail row */}
-      {valuation && valuation.includedEvals?.length > 0 && (
+      {hasValuation && (
         <Card className="py-3">
           <CardContent className="px-4">
             {/* Mobile: show first 2, expand for rest */}

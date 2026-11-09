@@ -147,6 +147,13 @@ func (r *RetryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			return resp, nil
 		}
 
+		// Counted before the retry decision, so a 429 on the last attempt is
+		// counted like any other. The number that matters is how often a host
+		// throttled us, not how often we gave up on it.
+		if resp.StatusCode == 429 {
+			recordRateLimit(req.URL.Host)
+		}
+
 		// Rate limited (429) or server error (5xx) — retry with backoff
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			if i < r.maxRetries {
