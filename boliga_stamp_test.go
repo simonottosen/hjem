@@ -139,6 +139,80 @@ func TestFetchedAddressesAreStampedInBatches(t *testing.T) {
 	}
 }
 
+// An address re-fetched because its stamp expired has to leave the fetch with
+// a new stamp, sale or no sale. Stamping only addresses whose stamp was zero
+// left this one carrying the old, expired stamp, so from the first expiry on it
+// re-fetched its whole street on every search. Most addresses have no recent
+// sale, so that was most of every lookup's Boliga requests.
+func TestExpiredAddressWithoutSaleIsRestamped(t *testing.T) {
+	addrs := []*Address{{
+		DawaUUID: "uuid-quiet", DawaID: "Gade 2", StreetName: "Gade", StreetNumber: "2",
+		PostalCode: "1666", MunicipalityCode: "101",
+		BoligaCollectedAt: time.Now().Add(-2 * cacheExpiry),
+	}}
+	bc := seedCacher(t, addrs)
+
+	var asked int
+	fetch := func(tasks []BoligaPropertyRequest, _ *Progress, _ *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		asked += len(tasks)
+		return nil, nil, nil
+	}
+
+	if _, _, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch); err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+	if asked != 1 {
+		t.Fatalf("the expired address asked for %d streets, want 1", asked)
+	}
+
+	// Read back, and search again with what was read: that is what the next
+	// lookup sees.
+	var stored Address
+	if err := bc.db.Where("dawa_uuid = ?", "uuid-quiet").First(&stored).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if age := time.Since(stored.BoligaCollectedAt); age >= cacheExpiry {
+		t.Fatalf("stored stamp is %s old after a fetch — still expired", age.Round(time.Hour))
+	}
+
+	asked = 0
+	if _, _, err := bc.FetchSales([]*Address{&stored}, NewProgress(), NewHealthStats(), fetch); err != nil {
+		t.Fatalf("second FetchSales: %v", err)
+	}
+	if asked != 0 {
+		t.Errorf("the next search re-fetched %d street(s) for an address checked a moment ago", asked)
+	}
+}
+
+// The other side of restamping: an address whose street failed was not
+// checked, and an expired one has already had its sales deleted, so a fresh
+// stamp would show it with no sales for a whole TTL. It has to stay due and be
+// retried by the next search.
+func TestAddressOnFailedStreetStaysDue(t *testing.T) {
+	stale := time.Now().Add(-2 * cacheExpiry)
+	addrs := []*Address{{
+		DawaUUID: "uuid-sold-once", DawaID: "Gade 2", StreetName: "Gade", StreetNumber: "2",
+		PostalCode: "1666", MunicipalityCode: "101", BoligaCollectedAt: stale,
+	}}
+	bc := seedCacher(t, addrs)
+
+	fetch := func(tasks []BoligaPropertyRequest, _ *Progress, _ *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+		return nil, []BoligaStreetFailure{{Task: tasks[0], Err: fmt.Errorf("status 429")}}, nil
+	}
+	if _, _, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch); err != nil {
+		t.Fatalf("FetchSales: %v", err)
+	}
+
+	var stored Address
+	if err := bc.db.Where("dawa_uuid = ?", "uuid-sold-once").First(&stored).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if age := time.Since(stored.BoligaCollectedAt); age < cacheExpiry {
+		t.Errorf("an address whose street failed was stamped %s ago — it will not be retried for a whole TTL",
+			age.Round(time.Second))
+	}
+}
+
 // Asking for two ranges at once hands FetchSales the inner addresses twice, as
 // two structs sharing a row: constructRanges searches DAR once per range and
 // the circles nest. Batching the stamps made that a correctness problem rather

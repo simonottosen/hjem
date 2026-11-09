@@ -163,6 +163,16 @@ func (p *Progress) FinishedAt() (time.Time, bool) {
 	return p.finishedAt, !p.finishedAt.IsZero()
 }
 
+// Outcome reports the current stage and its message. Kept apart from Snapshot
+// because Snapshot is written for the polling client: it counts down the
+// map-plan sends and attaches the whole result, so calling it just to ask how
+// the lookup ended would silently spend one of the three sends.
+func (p *Progress) Outcome() (ProgressStage, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stage, p.message
+}
+
 func (p *Progress) Snapshot() ProgressEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
