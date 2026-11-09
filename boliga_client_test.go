@@ -76,7 +76,7 @@ func TestClientFetchSkipsServerRequests(t *testing.T) {
 		},
 	}
 
-	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	sales, _, err := s.clientStreetFetcher(sess, &lookupLog{})(tasks, NewProgress(), s.stats)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestClientFetchFallsBackWhenNothingPosted(t *testing.T) {
 
 	tasks := []BoligaPropertyRequest{task("Vestergade", 1456), task("Nørregade", 1165)}
 
-	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	sales, _, err := s.clientStreetFetcher(sess, &lookupLog{})(tasks, NewProgress(), s.stats)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestClientFetchRetriesOnlyFailedStreets(t *testing.T) {
 		Failed:   []BoligaPropertyRequest{tasks[1]},
 	}
 
-	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	sales, _, err := s.clientStreetFetcher(sess, &lookupLog{})(tasks, NewProgress(), s.stats)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestClientFetchDiscardsUnsolicitedStreets(t *testing.T) {
 		},
 	}
 
-	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	sales, _, err := s.clientStreetFetcher(sess, &lookupLog{})(tasks, NewProgress(), s.stats)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestProgressCarriesTasksAsSoonAsStageIsVisible(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.clientStreetFetcher(sess)(tasks, p, s.stats)
+		s.clientStreetFetcher(sess, &lookupLog{})(tasks, p, s.stats)
 	}()
 
 	deadline := time.After(2 * time.Second)
@@ -296,7 +296,7 @@ func TestClientFetchLeavesNoGoroutineBehind(t *testing.T) {
 		}
 		tasks := []BoligaPropertyRequest{task("Vestergade", 1456)}
 		// Time out waiting, then post anyway — the closed-tab race.
-		s.clientStreetFetcher(sess)(tasks, sess.Progress, s.stats)
+		s.clientStreetFetcher(sess, &lookupLog{})(tasks, sess.Progress, s.stats)
 		sess.boligaIngest <- &BoligaIngest{LookupID: sess.ID}
 		// Reaching a terminal stage is what frees the session slot, so drive
 		// the lookup to one as runLookup would; otherwise this loop trips the
@@ -427,7 +427,7 @@ func TestEmptyStreetCountsAsFetched(t *testing.T) {
 		Fetched:  []BoligaFetchResult{{Task: tasks[0], Sales: nil}},
 	}
 
-	sales, _, err := s.clientStreetFetcher(sess)(tasks, NewProgress(), s.stats)
+	sales, _, err := s.clientStreetFetcher(sess, &lookupLog{})(tasks, NewProgress(), s.stats)
 	if err != nil {
 		t.Fatalf("lookup failed even though the browser covered a street: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestIngestRefusedAfterRelayCloses(t *testing.T) {
 	}
 
 	// Let the relay time out and stop listening.
-	s.clientStreetFetcher(sess)([]BoligaPropertyRequest{task("Vestergade", 1456)}, sess.Progress, s.stats)
+	s.clientStreetFetcher(sess, &lookupLog{})([]BoligaPropertyRequest{task("Vestergade", 1456)}, sess.Progress, s.stats)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/boliga/ingest",
 		bytes.NewBufferString(fmt.Sprintf(`{"lookup_id":%q,"ingest_token":%q,"fetched":[]}`, sess.ID, sess.Token)))

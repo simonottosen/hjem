@@ -13,7 +13,27 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+// gormConfig keeps GORM's own log from drowning out the lookup lines. Its
+// default logger reported every address-cache miss as an error — a miss is
+// how the cache works, not a fault — and on a slow statement printed it with
+// every bound value inlined, which for a batched address insert was fifty
+// rows of street names and coordinates on a single line. Slow statements are
+// still logged, as their SQL with placeholders. The plain writer replaces the
+// default's colour codes and leading blank line, which reach `docker logs` as
+// escape sequences and empty entries.
+func gormConfig() *gorm.Config {
+	return &gorm.Config{
+		Logger: logger.New(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			ParameterizedQueries:      true,
+		}),
+	}
+}
 
 func main() {
 	dbFile := flag.String("db-file", "hjem.db", "file for the database. default: hjem.db.")
@@ -73,7 +93,7 @@ func connectDB(sqliteFile string) (*gorm.DB, string) {
 
 		log.Printf("Attempting PostgreSQL connection to %s:%s/%s...", pgHost, pgPort, pgDB)
 
-		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		db, err := gorm.Open(postgres.Open(dsn), gormConfig())
 		if err == nil {
 			sqlDB, err := db.DB()
 			if err == nil {
@@ -96,7 +116,7 @@ func connectDB(sqliteFile string) (*gorm.DB, string) {
 	}
 
 	// Fallback to SQLite
-	db, err := gorm.Open(sqlite.Open(sqliteFile), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(sqliteFile), gormConfig())
 	if err != nil {
 		panic("failed to connect to any database")
 	}

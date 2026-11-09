@@ -18,7 +18,7 @@ Built for home buyers who want a data-driven baseline before negotiating — wit
 - **Whole-building sale removal** — automatically discards bulk portfolio transactions where the same total price appears across three or more apartments at the same address on the same date
 - **Year-over-year change** — shown for the most recent sale, estimated value, and DKK/m²
 - **Partial results with warnings** — if some streets fail to fetch, available data is returned alongside a warning rather than aborting
-- **Caching** — Boliga data is cached for 10 days in PostgreSQL or SQLite; address query results are cached for one year. Failed and empty lookups are never cached, so a query that resolves to nothing today is retried rather than pinned as nonexistent
+- **Caching** — Boliga data is cached for 3 days in PostgreSQL or SQLite; address query results are cached for one year. Failed and empty lookups are never cached, so a query that resolves to nothing today is retried rather than pinned as nonexistent
 
 ## Quick Start with Docker
 
@@ -358,7 +358,7 @@ go test ./...
 ```
 .
 ├── api.go           # HTTP routes and lookup orchestration
-├── boliga.go        # Boliga.dk scraper with 10-day DB caching
+├── boliga.go        # Boliga.dk scraper with 3-day DB caching
 ├── comps.go         # Gaussian-weighted comparable sales estimation
 ├── adressevaelger.go # Adressevælgeren free-text search and address enrichment
 ├── datafordeler.go  # Datafordeleren DAR radius search and EPSG:25832 projection
