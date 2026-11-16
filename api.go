@@ -146,6 +146,12 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 
 	p := sess.Progress
 
+	// Deferred so every exit is reported, the error returns below included:
+	// those only ever told the browser what went wrong, so a search that failed
+	// in production left no trace in the server log that it had run at all.
+	rec := &lookupLog{id: sess.ID, query: query, ranges: ranges, startedAt: time.Now()}
+	defer func() { rec.emit(p.Outcome()) }()
+
 	// Helper: check if this lookup was cancelled (replaced by a newer search
 	// from the same client, or evicted for running implausibly long)
 	cancelled := func() bool { return sess.ctx.Err() != nil }
@@ -156,7 +162,9 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	stageStart := time.Now()
 	endStage := func(stage string) {
 		now := time.Now()
-		s.stats.RecordStage(stage, now.Sub(stageStart))
+		took := now.Sub(stageStart)
+		s.stats.RecordStage(stage, took)
+		rec.stages = append(rec.stages, lookupStage{name: stage, took: took})
 		stageStart = now
 	}
 
@@ -200,6 +208,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	for _, addrsInRange := range rangeMap {
 		addrs = append(addrs, addrsInRange...)
 	}
+	rec.addrs = len(addrs)
 
 	// Before the stage change, not after: the plan only ships on the Boliga
 	// stages, and a client polling in between would start the visualization
@@ -207,7 +216,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	p.SetMapPlan(buildMapPlan(addr, addrs, ranges))
 
 	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
-	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess))
+	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess, rec))
 	endStage("boliga")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
@@ -266,6 +275,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	endStage("dingeo")
 
 	// Store result and mark done
+	rec.resp = luResp
 	p.SetResult(luResp)
 	p.Update(StageDone, "Færdig!", 0, 0)
 }
@@ -278,7 +288,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 // Every exit from here leaves the lookup able to continue: the browser may
 // return everything, some of it, or nothing at all, and the remainder is
 // always fetched locally.
-func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
+func (s *server) clientStreetFetcher(sess *lookupSession, rec *lookupLog) BoligaStreetFetcher {
 	return func(tasks []BoligaPropertyRequest, progress *Progress, stats *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
 		if len(tasks) == 0 {
 			return nil, nil, nil
@@ -320,6 +330,7 @@ func (s *server) clientStreetFetcher(sess *lookupSession) BoligaStreetFetcher {
 		if stats != nil {
 			stats.RecordRelayStreets(fetchedStreets, len(tasks))
 		}
+		rec.relayFetched, rec.relayTasks = fetchedStreets, len(tasks)
 
 		if len(remaining) == 0 {
 			return clientSales, nil, nil
@@ -729,6 +740,14 @@ type LookupResponse struct {
 	ValuationUnavailable bool           `json:"valuation_unavailable,omitempty"`
 	CompsEstimate        *CompsEstimate `json:"comps_estimate,omitempty"`
 	Warnings             []string       `json:"warnings,omitempty"`
+	// SalesFetchedAt is when the least recently checked address in the radius
+	// was fetched from Boliga — the page is as current as that, and no more.
+	// Absent when no address has been fetched at all. The newest sale on a
+	// page can be months old even when the fetch was not, because Boliga only
+	// learns of a sale once the deed is registered; without the date shown
+	// beside it, the two are indistinguishable to a reader and the page simply
+	// looks stuck.
+	SalesFetchedAt *time.Time `json:"sales_fetched_at,omitempty"`
 }
 
 type JSONSale struct {
@@ -813,6 +832,16 @@ func FormatLookupResponse(addrs []*Address, ranges map[int][]*Address, sales [][
 
 	var i int
 	for j, s := range sales {
+		// The oldest stamp, taken before addresses without sales are dropped:
+		// an unsold address checked three days ago is exactly where a sale
+		// registered since would be missing, so its stamp bounds how current
+		// the page is as much as a sold one's does. Oldest, because one
+		// response mixes addresses fetched by different lookups days apart.
+		if fetched := addrs[j].BoligaCollectedAt; !fetched.IsZero() &&
+			(resp.SalesFetchedAt == nil || fetched.Before(*resp.SalesFetchedAt)) {
+			resp.SalesFetchedAt = &fetched
+		}
+
 		// Addresses with no sales carry no information and are dropped, which
 		// is why the output index i runs independently of j. The searched
 		// address is the exception: it is what primary_idx refers to, and a

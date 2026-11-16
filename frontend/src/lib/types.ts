@@ -76,6 +76,9 @@ export interface LookupResponse {
   valuation_unavailable?: boolean;
   comps_estimate?: CompsEstimate | null;
   warnings?: string[];
+  // When the least recently checked address in the radius was fetched from
+  // Boliga. Absent when none has been fetched.
+  sales_fetched_at?: string;
   error?: string;
 }
 

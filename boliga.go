@@ -78,7 +78,16 @@ func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 	return &boligaCacher{db}
 }
 
-const cacheExpiry time.Duration = time.Hour * 24 * 10 // 10 days
+// cacheExpiry is short because Boliga's newest months are the ones still
+// changing. A sale reaches Boliga only once the deed is registered, weeks or
+// months after the purchase date: in November 2026 Copenhagen had 590 sales on
+// Boliga for May, 289 for September and 105 for October, and September and
+// October went on filling in. Every day a street stays cached is another day
+// those late arrivals are hidden behind the ones Boliga already had, which is
+// what made a page fetched on 2 November and read on the 9th look as if
+// nothing had sold since August. Three days rather than one because each
+// expiry costs a request per street against Boliga's rate limit.
+const cacheExpiry time.Duration = time.Hour * 24 * 3
 
 func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *HealthStats, fetch BoligaStreetFetcher) ([][]Sale, []string, error) {
 	cachedAddrs := map[int]*Address{}
@@ -125,7 +134,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		}
 
 		// Only the uncached streets become fetch work. This is what keeps the
-		// 10-day shared cache worth having once fetching moves to the browser:
+		// shared cache worth having once fetching moves to the browser:
 		// a warm cache still hands the client an empty list.
 		tasks := BoligaStreetTasks(addrsToFetch)
 		totalSales, failures, err := fetch(tasks, progress, stats)
@@ -189,11 +198,25 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 			}
 		}
 
-		// Mark ALL fetched addresses as checked — even those without matches.
-		// Without this, unmatched addresses (BoligaCollectedAt stays zero) trigger
-		// a full re-fetch of their entire street on every subsequent search.
+		// Mark every address whose street came back as checked — even those
+		// without matches. Without this, unmatched addresses trigger a full
+		// re-fetch of their entire street on every subsequent search. Compared
+		// against this fetch's time rather than against zero: an address that
+		// was re-fetched because its stamp had expired still carries that old
+		// stamp, and testing for zero left it expired, so once the TTL first
+		// ran out every address without a sale re-fetched its street on every
+		// search after.
+		//
+		// A street that failed is the exception. Its addresses were not checked,
+		// and an expired one has already had its sales deleted above, so a
+		// stamp would show it as having none for a whole TTL instead of
+		// retrying it on the next search.
+		failed := make(map[BoligaPropertyRequest]bool, len(failures))
+		for _, f := range failures {
+			failed[f.Task] = true
+		}
 		for _, addr := range addrsToFetch {
-			if addr.BoligaCollectedAt.IsZero() {
+			if !addr.BoligaCollectedAt.Equal(fetchTime) && !failed[addrStreetTask(addr)] {
 				addr.BoligaCollectedAt = fetchTime
 				addrsToStore = append(addrsToStore, addr)
 			}

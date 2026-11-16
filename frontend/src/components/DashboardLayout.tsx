@@ -4,6 +4,7 @@ import { MetricsRow } from "./MetricsRow";
 import { PriceScatterChart } from "./PriceScatterChart";
 import { SqMeterLineChart } from "./SqMeterLineChart";
 import { SalesTable } from "./SalesTable";
+import { SalesFreshness } from "./SalesFreshness";
 import { CsvDownloadButton } from "./CsvDownloadButton";
 import { WarningBanner } from "./WarningBanner";
 import { TimeRangeSlider } from "./TimeRangeSlider";
@@ -132,6 +133,7 @@ export function DashboardLayout({
           <CsvDownloadButton query={query} range={range} />
         </CardHeader>
         <CardContent className="overflow-x-auto">
+          <SalesFreshness fetchedAt={rawData.sales_fetched_at} />
           <SalesTable
             data={rawData}
             excludedAddrs={excludedAddrs}

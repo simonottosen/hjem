@@ -48,7 +48,7 @@ docker run -p 8080:8080 hjem
 3. Frontend polls `GET /api/progress?id=<lookup_id>` every ~2s until `done: true`. A 404 means the session was replaced or expired, and the client stops polling instead of hanging
 4. Backend updates that session's own `Progress` struct (in `progress.go`) as each stage completes:
    - Adressevælger free-text address lookup → DAR radius search for nearby addresses
-   - Boliga sales scrape (cached 10 days in DB via GORM)
+   - Boliga sales scrape (cached 3 days in DB via GORM)
    - Comps estimation (weighted by recency, size, rooms, age, distance)
    - Square-meter aggregation by year
    - Dingeo valuations (optional, skipped if FlareSolverr unavailable)
@@ -148,4 +148,4 @@ Specialized sub-agents in `.claude/agents/` can be invoked for specific tasks:
 - CSS is injected into `app.bundle.js` (single file output); don't try to import a separate CSS file
 - Dev proxy: Vite forwards `/api` and `/download` to `:8080`, so frontend and backend can run separately in development
 - SQLite is the default; PostgreSQL is opt-in via env vars
-- Boliga sales are cached by address (10-day TTL) to avoid re-scraping
+- Boliga sales are cached by address (3-day TTL) to avoid re-scraping
