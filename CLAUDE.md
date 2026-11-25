@@ -52,6 +52,7 @@ docker run -p 8080:8080 hjem
    - Comps estimation (weighted by recency, size, rooms, age, distance)
    - Square-meter aggregation by year
    - Dingeo valuations (optional, skipped if FlareSolverr unavailable)
+5. The finished response is stored (`storedlookup.go`) under a share id, separate from the `lookup_id`, and returned as `result_id`. The page writes `?lookup=<result_id>&q=…&r=…&f=…` into the address bar; opening that link fetches `GET /api/result?id=` and renders without re-running the lookup. Stored results expire after 30 days, after which the link falls back to searching `q` afresh
 
 ### Backend files
 - `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration
@@ -62,8 +63,9 @@ docker run -p 8080:8080 hjem
 - `dingeo.go` — Dingeo + FlareSolverr valuation scraper
 - `comps.go` — Gaussian-weighted comparable sales estimation
 - `math.go` — IQR outlier filtering, year-over-year stats
-- `models.go` — GORM domain models (Address, Sale, CachedLookup)
+- `models.go` — `Config` and the `Store` address streamer (the `Address` model is in `dawa.go`, `Sale` in `boliga.go`)
 - `progress.go` — Async progress tracking struct
+- `storedlookup.go` — Finished lookups kept 30 days under a share id (`StoredLookup`, pruned on each save) and `GET /api/result`
 - `sessions.go` — Per-lookup sessions keyed by `lookup_id`: each owns a `Progress` and a cancel func, so concurrent users don't cancel each other. Caps active lookups at 8 (429 beyond), evicts finished ones after 15 min
 - `health.go` — `/api/health` + Prometheus `/metrics`
 - `app/main.go` — Entry point: flags, DB init, server start
@@ -72,6 +74,7 @@ docker run -p 8080:8080 hjem
 - `src/App.tsx` — Root state: search params, progress polling, result
 - `src/hooks/useSearch.ts` — POST /api/lookup
 - `src/hooks/useProgress.ts` — Poll /api/progress, parse result
+- `src/hooks/useStoredResult.ts` — Read/write the `?lookup=&q=&r=&f=` link; on load, render a stored result or start the linked search
 - `src/hooks/useFilteredData.ts` — Client-side exclusion filtering
 - `src/lib/compute.ts` — Client-side comps, sqm stats, projections
 - `src/lib/api.ts` — fetch() wrappers
