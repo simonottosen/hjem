@@ -1,4 +1,4 @@
-import type { ProgressEvent, BoligaRelayOutcome } from "./types";
+import type { ProgressEvent, BoligaRelayOutcome, StoredLookup } from "./types";
 
 // Thrown when the server no longer recognises a lookup id: it was replaced by
 // a newer search or it aged out. Polling cannot recover from this, so it is a
@@ -91,6 +91,20 @@ export async function fetchProgress(lookupId: string): Promise<ProgressEvent> {
     console.warn("[hjem] Lookup warnings:", data.warnings);
   }
   return data;
+}
+
+// Fetch a finished lookup by the id in its link. Null when the server has
+// none under that id — never stored, or older than it keeps them — which the
+// caller answers by searching afresh, so it is not an error.
+export async function fetchStoredResult(id: string): Promise<StoredLookup | null> {
+  const resp = await fetch(`/api/result?id=${encodeURIComponent(id)}`);
+  if (resp.status === 404) {
+    return null;
+  }
+  if (!resp.ok) {
+    throw new Error(`Server error ${resp.status}`);
+  }
+  return resp.json();
 }
 
 // Tell the server we have walked away from a lookup, so it stops holding one

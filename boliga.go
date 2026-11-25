@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -71,11 +73,13 @@ type BoligaStreetFetcher func([]BoligaPropertyRequest, *Progress, *HealthStats) 
 
 type boligaCacher struct {
 	db *gorm.DB
+	// storeMu serializes the writes at the end of a fetch; see FetchSales.
+	storeMu sync.Mutex
 }
 
 func NewBoligaCacher(db *gorm.DB) *boligaCacher {
 	db.AutoMigrate(&Sale{})
-	return &boligaCacher{db}
+	return &boligaCacher{db: db}
 }
 
 // cacheExpiry is short because Boliga's newest months are the ones still
@@ -92,7 +96,7 @@ const cacheExpiry time.Duration = time.Hour * 24 * 3
 func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *HealthStats, fetch BoligaStreetFetcher) ([][]Sale, []string, error) {
 	cachedAddrs := map[int]*Address{}
 	fetchAddrs := map[int]*Address{}
-	var salesExpired []uint
+	var expired int
 
 	for i, addr := range addrs {
 		if addr.BoligaCollectedAt.IsZero() {
@@ -102,7 +106,7 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 
 		if time.Now().Sub(addr.BoligaCollectedAt) >= cacheExpiry {
 			fetchAddrs[i] = addr
-			salesExpired = append(salesExpired, addr.ID)
+			expired++
 			continue
 		}
 
@@ -110,14 +114,10 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 	}
 
 	log.Printf("Boliga cache: %d cached, %d to fetch, %d expired (of %d total)",
-		len(cachedAddrs), len(fetchAddrs), len(salesExpired), len(addrs))
+		len(cachedAddrs), len(fetchAddrs), expired, len(addrs))
 	if stats != nil {
 		stats.RecordCacheHit(len(cachedAddrs))
 		stats.RecordCacheMiss(len(fetchAddrs))
-	}
-
-	if len(salesExpired) > 0 {
-		bc.db.Where("addr_id IN ?", salesExpired).Delete(&Sale{})
 	}
 
 	sales := make([][]Sale, len(addrs))
@@ -145,17 +145,66 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 			return nil, failureWarnings(failures), err
 		}
 		warnings = summarizeFetch(len(cachedAddrs), addrsToFetch, len(tasks), failures)
-		matched := matchSalesToAddrs(addrsToFetch, totalSales)
+
+		// Boliga answers with the whole street, so the answer is matched against
+		// every address known on it, not only the ones that fell due: this
+		// lookup's still-cached addresses there, and stored ones outside its
+		// radius. Matching only the due ones left a street's addresses stamped
+		// days apart by whichever lookups happened to touch them, and each one
+		// expiring fetched the whole street again while the sales just fetched
+		// for its neighbours were thrown away.
+		//
+		// A neighbour whose address string a different row on a due street also
+		// carries is left out and stays as it was. Matching keys on that string,
+		// which has no postcode, so with a Skolevej in each of two villages due
+		// at once, one Skolevej 3 would be handed the other's sales and have its
+		// own deleted. Twins of one row share an id and do not count.
+		due := make(map[BoligaPropertyRequest]bool, len(tasks))
+		for _, t := range tasks {
+			due[t] = true
+		}
+		neighbours, err := bc.storedStreetAddrs(due, addrsToFetch, addrs)
+		if err != nil {
+			return nil, warnings, err
+		}
+		for _, addr := range cachedAddrs {
+			if due[addrStreetTask(addr)] {
+				neighbours = append(neighbours, addr)
+			}
+		}
+		owner := make(map[string]uint)
+		clash := make(map[string]bool)
+		for _, list := range [][]*Address{neighbours, addrsToFetch} {
+			for _, addr := range list {
+				key := normalizeAddr(addr.Short())
+				if id, ok := owner[key]; ok && id != addr.ID {
+					clash[key] = true
+				}
+				owner[key] = addr.ID
+			}
+		}
+		var candidates []*Address
+		for _, addr := range neighbours {
+			if !clash[normalizeAddr(addr.Short())] {
+				candidates = append(candidates, addr)
+			}
+		}
+		offset := len(candidates)
+		candidates = append(candidates, addrsToFetch...)
+		matched := matchSalesToAddrs(candidates, totalSales)
+
+		failed := make(map[BoligaPropertyRequest]bool, len(failures))
+		for _, f := range failures {
+			failed[f.Task] = true
+		}
 
 		var salesToStore []Sale
 		var addrsToStore []*Address
 		for i, items := range matched {
-			if len(items) == 0 {
+			addr := candidates[i]
+			if len(items) == 0 || failed[addrStreetTask(addr)] {
 				continue
 			}
-
-			origIdx := ids[i]
-			addr := addrs[origIdx]
 
 			psales := make([]Sale, len(items))
 			for j, item := range items {
@@ -169,7 +218,12 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 				}
 			}
 
-			sales[origIdx] = psales
+			// Neighbours are not in this lookup's result. A still-cached one of
+			// this lookup's own gets its new sales from the cached read below,
+			// which runs after they are stored.
+			if i >= offset {
+				sales[ids[i-offset]] = psales
+			}
 			salesToStore = append(salesToStore, psales...)
 
 			// Update address with best available Boliga metadata across all matched sales
@@ -192,12 +246,6 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 			addrsToStore = append(addrsToStore, addr)
 		}
 
-		if len(salesToStore) > 0 {
-			if err := bc.db.CreateInBatches(&salesToStore, 50).Error; err != nil {
-				return nil, warnings, err
-			}
-		}
-
 		// Mark every address whose street came back as checked — even those
 		// without matches. Without this, unmatched addresses trigger a full
 		// re-fetch of their entire street on every subsequent search. Compared
@@ -208,15 +256,17 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		// search after.
 		//
 		// A street that failed is the exception. Its addresses were not checked,
-		// and an expired one has already had its sales deleted above, so a
-		// stamp would show it as having none for a whole TTL instead of
-		// retrying it on the next search.
-		failed := make(map[BoligaPropertyRequest]bool, len(failures))
-		for _, f := range failures {
-			failed[f.Task] = true
-		}
-		for _, addr := range addrsToFetch {
-			if !addr.BoligaCollectedAt.Equal(fetchTime) && !failed[addrStreetTask(addr)] {
+		// so they keep both their stamp and their sales and the next search
+		// retries them. That is also why their old sales are deleted only here,
+		// after the fetch, and only for streets that came back: deleting
+		// before it lost an expired address's sales to any fetch that failed.
+		var refreshed []uint
+		for _, addr := range candidates {
+			if failed[addrStreetTask(addr)] {
+				continue
+			}
+			refreshed = append(refreshed, addr.ID)
+			if !addr.BoligaCollectedAt.Equal(fetchTime) {
 				addr.BoligaCollectedAt = fetchTime
 				addrsToStore = append(addrsToStore, addr)
 			}
@@ -248,27 +298,89 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		}
 		addrsToStore = uniqueAddrs
 
-		// A dense first lookup stamps some 2900 addresses, and a statement each
-		// is merely slow against SQLite but a network round-trip each against
-		// the Postgres deployment. These rows all exist already, yet each
-		// carries its own metadata, so no single UPDATE ... WHERE id IN (...)
-		// expresses them: an upsert is the only batched row-update either
-		// engine offers.
-		//
-		// The conflict target is named rather than left implicit because
-		// addresses carry unique indexes on dawa_id and dawa_uuid as well, and
-		// only a conflict on the arbiter index resolves to DO UPDATE; every row
-		// here is written back under the id it was read with. Batched at 50
-		// like the sales above: an address is nineteen columns and a radius
-		// search can carry ten thousand of them, which as one statement would
-		// run past the 65535 bind parameters Postgres accepts.
-		if len(addrsToStore) > 0 {
-			if err := bc.db.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "id"}},
-				UpdateAll: true,
-			}).CreateInBatches(addrsToStore, 50).Error; err != nil {
-				return nil, warnings, err
+		// Replacing sales is a delete and an insert, and it now reaches
+		// addresses other lookups are reading from cache or fetching too. In one
+		// transaction, a reader never sees an address between the two, and a
+		// failed insert cannot leave a still-fresh address stamped with its
+		// sales gone. Under the lock, two lookups that fetched the same street
+		// replace its sales one after the other; interleaved, both deletes
+		// could run before both inserts and leave every sale stored twice.
+		bc.storeMu.Lock()
+		err = bc.db.Transaction(func(tx *gorm.DB) error {
+			// The lock orders the writes, not the fetches. A lookup that asked
+			// Boliga first can get its answer last, after a later fetch of the
+			// same street has been stored, and writing it then would move the
+			// stamp back in time and put back sales Boliga has since added to.
+			// So an address stamped after this fetch is left as it is stored,
+			// and this lookup's own copy takes the stored row: its fetched
+			// sales go too, and the cached read below returns the stored ones.
+			newer := make(map[uint]*Address)
+			for start := 0; start < len(refreshed); start += collapseBatch {
+				var rows []*Address
+				if err := tx.Where("id IN ?", refreshed[start:min(start+collapseBatch, len(refreshed))]).Find(&rows).Error; err != nil {
+					return err
+				}
+				for _, a := range rows {
+					if a.BoligaCollectedAt.After(fetchTime) {
+						newer[a.ID] = a
+					}
+				}
 			}
+			if len(newer) > 0 {
+				refreshed = slices.DeleteFunc(refreshed, func(id uint) bool { return newer[id] != nil })
+				salesToStore = slices.DeleteFunc(salesToStore, func(s Sale) bool { return newer[s.AddrID] != nil })
+				addrsToStore = slices.DeleteFunc(addrsToStore, func(a *Address) bool { return newer[a.ID] != nil })
+				for _, a := range candidates {
+					if stored := newer[a.ID]; stored != nil {
+						*a = *stored
+					}
+				}
+				for j, a := range addrsToFetch {
+					if newer[a.ID] != nil {
+						sales[ids[j]] = nil
+						cachedAddrs[ids[j]] = a
+					}
+				}
+			}
+
+			for start := 0; start < len(refreshed); start += collapseBatch {
+				batch := refreshed[start:min(start+collapseBatch, len(refreshed))]
+				if err := tx.Where("addr_id IN ?", batch).Delete(&Sale{}).Error; err != nil {
+					return err
+				}
+			}
+			if len(salesToStore) > 0 {
+				if err := tx.CreateInBatches(&salesToStore, 50).Error; err != nil {
+					return err
+				}
+			}
+
+			// A dense first lookup stamps some 2900 addresses, and a statement
+			// each is merely slow against SQLite but a network round-trip each
+			// against the Postgres deployment. These rows all exist already, yet
+			// each carries its own metadata, so no single UPDATE ... WHERE id IN
+			// (...) expresses them: an upsert is the only batched row-update
+			// either engine offers.
+			//
+			// The conflict target is named rather than left implicit because
+			// addresses carry unique indexes on dawa_id and dawa_uuid as well,
+			// and only a conflict on the arbiter index resolves to DO UPDATE;
+			// every row here is written back under the id it was read with.
+			// Batched at 50 like the sales above: an address is nineteen columns
+			// and a radius search can carry ten thousand of them, which as one
+			// statement would run past the 65535 bind parameters Postgres
+			// accepts.
+			if len(addrsToStore) > 0 {
+				return tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "id"}},
+					UpdateAll: true,
+				}).CreateInBatches(addrsToStore, 50).Error
+			}
+			return nil
+		})
+		bc.storeMu.Unlock()
+		if err != nil {
+			return nil, warnings, err
 		}
 	}
 
@@ -292,6 +404,49 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 	}
 
 	return sales, warnings, nil
+}
+
+// storedStreetAddrs loads the stored addresses on the due streets that this
+// lookup does not hold. The columns are strings and the street key is not —
+// municipality codes are stored both as "0101" and "101" — so SQL only narrows
+// by name and postcode, using the spellings the due addresses carry, and the key
+// itself is compared here. Every fetch runs this, which is what the
+// idx_addresses_street index on those two columns is for.
+func (bc *boligaCacher) storedStreetAddrs(due map[BoligaPropertyRequest]bool, fetching, lookup []*Address) ([]*Address, error) {
+	inLookup := make(map[uint]bool, len(lookup))
+	for _, a := range lookup {
+		inLookup[a.ID] = true
+	}
+	var names, postcodes []string
+	seenName, seenPostcode := map[string]bool{}, map[string]bool{}
+	for _, a := range fetching {
+		if !seenName[a.StreetName] {
+			seenName[a.StreetName] = true
+			names = append(names, a.StreetName)
+		}
+		if !seenPostcode[a.PostalCode] {
+			seenPostcode[a.PostalCode] = true
+			postcodes = append(postcodes, a.PostalCode)
+		}
+	}
+
+	// Batched by name only: a radius spans a handful of postcodes but can
+	// span hundreds of streets. Each batch is a different set of names, so no
+	// row comes back twice.
+	var out []*Address
+	for start := 0; start < len(names); start += collapseBatch {
+		var rows []*Address
+		if err := bc.db.Where("street_name IN ? AND postal_code IN ?",
+			names[start:min(start+collapseBatch, len(names))], postcodes).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, a := range rows {
+			if !inLookup[a.ID] && due[addrStreetTask(a)] {
+				out = append(out, a)
+			}
+		}
+	}
+	return out, nil
 }
 
 // maxStreetWarnings bounds the per-street detail. Boliga failing wholesale

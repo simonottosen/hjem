@@ -75,6 +75,7 @@ func NewServer(db *gorm.DB) *server {
 		bc:       bc,
 		sessions: newSessionStore(),
 		stats:    NewHealthStats(),
+		results:  newLookupStore(db),
 	}
 }
 
@@ -83,6 +84,7 @@ type server struct {
 	bc       BoligaCacher
 	stats    *HealthStats
 	sessions *sessionStore
+	results  *lookupStore
 }
 
 func (s *server) handleLookup() http.HandlerFunc {
@@ -283,6 +285,25 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 		s.stats.RecordDingeo("ok")
 	}
 	endStage("dingeo")
+
+	// Checked again because Dingeo can take many seconds behind FlareSolverr:
+	// a lookup replaced in that time has no one waiting for it, and storing
+	// it would keep a result nobody can find for a month.
+	if cancelled() {
+		log.Printf("Lookup cancelled before result delivery for %q", query)
+		return
+	}
+
+	// Kept before delivery so the page receives the share id with the
+	// result. A failed save costs the link, not the lookup — unless it failed
+	// because the lookup was replaced meanwhile, which Save has then undone.
+	if err := s.results.Save(sess.ctx, query, ranges, filter, luResp); err != nil {
+		if cancelled() {
+			log.Printf("Lookup cancelled before result delivery for %q", query)
+			return
+		}
+		log.Printf("Storing result failed for %q: %v", query, err)
+	}
 
 	// Store result and mark done
 	rec.resp = luResp
@@ -722,6 +743,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.Handle("/dist/", s.handleDist())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
 	mux.HandleFunc("/api/progress", s.handleProgress())
+	mux.HandleFunc("/api/result", s.handleResult())
 	mux.HandleFunc("/api/boliga/ingest", s.handleBoligaIngest())
 	mux.HandleFunc("/api/health", s.handleHealth())
 	mux.HandleFunc("/metrics", s.handleMetrics())
@@ -821,6 +843,9 @@ type LookupResponse struct {
 	// beside it, the two are indistinguishable to a reader and the page simply
 	// looks stuck.
 	SalesFetchedAt *time.Time `json:"sales_fetched_at,omitempty"`
+	// ResultID is the share id the finished lookup was stored under, for the
+	// page to put in its address bar. Absent when storing it failed.
+	ResultID string `json:"result_id,omitempty"`
 }
 
 type JSONSale struct {
