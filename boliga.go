@@ -962,7 +962,7 @@ func FilterAddressesByProperty(pt PropertyType, addrs []*Address, sales [][]Sale
 	for i := range addrs {
 		a, s := addrs[i], sales[i]
 		// Always keep the primary address (index 0) and addresses matching the type
-		if i == 0 || a.BoligaPropertyKind == pt || a.BoligaPropertyKind == 0 {
+		if k := a.PropertyKind(); i == 0 || k == pt || k == 0 {
 			oAddrs = append(oAddrs, a)
 			oSales = append(oSales, s)
 			kept++

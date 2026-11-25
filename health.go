@@ -39,7 +39,7 @@ type HealthResponse struct {
 // series exists on a server that has served no lookups: a metric that
 // materialises on first use reads as "missing" at exactly the moment someone is
 // checking whether the thing is broken.
-var lookupStages = []string{"address", "nearby", "boliga", "format", "dingeo"}
+var lookupStages = []string{"address", "nearby", "boliga", "bbr", "format", "dingeo"}
 
 // Dingeo outcomes, kept apart because they call for different responses:
 // "ok" and "none" are both Dingeo answering, "unavailable" is Dingeo or

@@ -129,6 +129,7 @@ The multi-stage Dockerfile builds the React frontend with Node 22 Alpine, then c
 |----------|----------|---------|-------------|
 | `DATAFORDELER_API_KEY` | **Yes** | — | API key for [Datafordeleren](https://datafordeler.dk), used for nearby-address radius search. The server refuses to start without it |
 | `DATAFORDELER_GRAPHQL_URL` | No | `https://graphql.datafordeler.dk/DAR/v3` | Override the DAR GraphQL endpoint |
+| `BBR_GRAPHQL_URL` | No | `https://graphql.datafordeler.dk/BBR/v2` | Override the BBR GraphQL endpoint used for property types |
 | `ADRESSEVAELGER_TOKEN` | No | `adressevaelger123` | Token for [Adressevælgeren](https://adressevaelger.dk). The parameter is mandatory on every request, but user management is not yet implemented, so the documented public token is the default |
 | `ADRESSEVAELGER_URL` | No | `https://adressevaelger.dk` | Override the Adressevælger base URL |
 | `POSTGRES_PASSWORD` | No | — | Enables PostgreSQL. If set, the server connects to PostgreSQL instead of SQLite |

@@ -35,6 +35,7 @@ docker run -p 8080:8080 hjem
 ### Environment variables
 - `DATAFORDELER_API_KEY` — **required**. Datafordeleren API key for the nearby-address radius search; the server refuses to boot without it
 - `DATAFORDELER_GRAPHQL_URL` — override the DAR GraphQL endpoint (default `https://graphql.datafordeler.dk/DAR/v3`)
+- `BBR_GRAPHQL_URL` — override the BBR GraphQL endpoint used for property types (default `https://graphql.datafordeler.dk/BBR/v2`; same `DATAFORDELER_API_KEY`)
 - `ADRESSEVAELGER_TOKEN` — Adressevælger token (default: the documented public `adressevaelger123`; the parameter is mandatory but not yet tied to an account)
 - `ADRESSEVAELGER_URL` — override the Adressevælger base URL (used by tests to point at an httptest server)
 - `POSTGRES_PASSWORD` — if set, uses PostgreSQL instead of SQLite (also needs `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_DB`)
@@ -60,6 +61,7 @@ docker run -p 8080:8080 hjem
 - `adressevaelger.go` — Adressevælgeren: free-text address search (phonetic → ASCII re-spelling → `/vask/` for historical designations; dead addresses and interval matches are rejected rather than substituted), plus batch enrichment of DAR results with street/postal/municipality
 - `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection. DAR caps a page at 1000 nodes and rejects a larger `first`, so all three queries are cursor-paginated via `darPostAll`; reading one page silently under-samples dense areas
 - `dawa.go` — the `Address` model plus `dawaCacher` (the URL-keyed, 365-day address query cache shared by `AVFuzzySearch` and `DARNearbySearch`; failed *and* empty results are deliberately not cached). No DAWA client remains — the service shut down 1 Oct 2026 and only the `Dawa*` names are legacy
+- `bbr.go` — BBR property types for addresses no Boliga sale has typed: one batched `BBR_Enhed` query by DAR address id, unit usage code (`enh020`) mapped to Boliga's four kinds, stored on the address for a year. `Address.PropertyKind()` prefers Boliga's type, and the comps filter compares that
 - `dingeo.go` — Dingeo + FlareSolverr valuation scraper
 - `comps.go` — Gaussian-weighted comparable sales estimation
 - `math.go` — IQR outlier filtering, year-over-year stats

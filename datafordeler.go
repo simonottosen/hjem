@@ -226,9 +226,15 @@ const darQueryAdresser = `query Adresser($after: String) {
 // from the environment. Addresses are public data, so an API key is sufficient;
 // override the base URL with DATAFORDELER_GRAPHQL_URL if needed.
 func darEndpoint() (string, error) {
-	base := os.Getenv("DATAFORDELER_GRAPHQL_URL")
+	return datafordelerEndpoint("DATAFORDELER_GRAPHQL_URL", darGraphQLDefaultURL)
+}
+
+// datafordelerEndpoint is darEndpoint for any Datafordeler register: the one
+// API key serves them all, and only the base URL and its override differ.
+func datafordelerEndpoint(urlEnv, defaultURL string) (string, error) {
+	base := os.Getenv(urlEnv)
 	if base == "" {
-		base = darGraphQLDefaultURL
+		base = defaultURL
 	}
 
 	key := os.Getenv("DATAFORDELER_API_KEY")
@@ -238,7 +244,7 @@ func darEndpoint() (string, error) {
 
 	u, err := url.Parse(base)
 	if err != nil {
-		return "", fmt.Errorf("invalid DATAFORDELER_GRAPHQL_URL: %w", err)
+		return "", fmt.Errorf("invalid %s: %w", urlEnv, err)
 	}
 	q := u.Query()
 	q.Set("apiKey", key)

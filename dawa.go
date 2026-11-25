@@ -44,6 +44,21 @@ type Address struct {
 	BoligaBuiltYear           int          `json:"built_year"`
 	BoligaMonthlyOwnerExpense int          `json:"monthly_owner_expense_dkk"`
 	BoligaEnergyMarking       string       `json:"energy_marking"`
+
+	// The property type BBR records for the address's units, for when no
+	// Boliga sale has supplied one, and when BBR was last asked. See bbr.go.
+	BBRPropertyKind PropertyType `json:"-"`
+	BBRCheckedAt    time.Time    `json:"-"`
+}
+
+// PropertyKind is the type the comparables filter compares: the one read off a
+// matched Boliga sale when there is one, since that is what Boliga's own
+// listings call it, and BBR's otherwise. Zero means unknown.
+func (addr Address) PropertyKind() PropertyType {
+	if addr.BoligaPropertyKind != 0 {
+		return addr.BoligaPropertyKind
+	}
+	return addr.BBRPropertyKind
 }
 
 func (addr Address) Short() string {
