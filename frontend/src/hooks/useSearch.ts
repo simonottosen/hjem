@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { LookupResponse } from "@/lib/types";
 import { cancelLookup, startLookup, type LookupSession } from "@/lib/api";
+import type { LonLat } from "@/lib/area";
 
 export function useSearch() {
   const [data, setData] = useState<LookupResponse | null>(null);
@@ -42,14 +43,15 @@ export function useSearch() {
       query: string,
       range: number,
       filter: number,
-      onStarted: (session: LookupSession) => void
+      onStarted: (session: LookupSession) => void,
+      area?: LonLat[]
     ) => {
       setIsLoading(true);
       setError(null);
       setData(null);
 
       try {
-        const session = await startLookup(query, range, filter, lookupIdRef.current);
+        const session = await startLookup(query, range, filter, lookupIdRef.current, area);
         lookupIdRef.current = session.lookupId;
         inFlightRef.current = true;
         onStarted(session); // Signal that polling should begin

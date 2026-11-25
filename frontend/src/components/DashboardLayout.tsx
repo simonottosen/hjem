@@ -1,5 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import type { LookupResponse } from "@/lib/types";
+import type { LonLat } from "@/lib/area";
 import { MetricsRow } from "./MetricsRow";
 import { PriceScatterChart } from "./PriceScatterChart";
 import { SqMeterLineChart } from "./SqMeterLineChart";
@@ -48,6 +49,7 @@ interface DashboardLayoutProps {
   rawData: LookupResponse;
   query: string;
   range: number;
+  area: LonLat[] | null;
   excludedAddrs: Set<number>;
   onToggleExcluded: (addrIdx: number) => void;
 }
@@ -57,6 +59,7 @@ export function DashboardLayout({
   rawData,
   query,
   range,
+  area,
   excludedAddrs,
   onToggleExcluded,
 }: DashboardLayoutProps) {
@@ -130,7 +133,7 @@ export function DashboardLayout({
               </span>
             )}
           </CardTitle>
-          <CsvDownloadButton query={query} range={range} />
+          <CsvDownloadButton query={query} range={range} area={area} />
         </CardHeader>
         <CardContent className="overflow-x-auto">
           <SalesFreshness fetchedAt={rawData.sales_fetched_at} />
