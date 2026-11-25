@@ -76,6 +76,7 @@ func NewServer(db *gorm.DB) *server {
 		sessions: newSessionStore(),
 		stats:    NewHealthStats(),
 		results:  newLookupStore(db),
+		bbr:      &bbrCacher{db: db},
 	}
 }
 
@@ -85,6 +86,33 @@ type server struct {
 	stats    *HealthStats
 	sessions *sessionStore
 	results  *lookupStore
+	// bbr is nil in tests that build a server by hand; property types then
+	// come from Boliga sales alone, as they always did.
+	bbr *bbrCacher
+}
+
+// fillPropertyKinds asks BBR for the types Boliga did not supply. After the
+// Boliga fetch, so a type read off a matched sale is the one kept, and before
+// the filter that needs them. A BBR failure is logged, not fatal: without the
+// types the filter falls back to what it did before BBR was consulted.
+//
+// Only the searched property and the addresses with sales are asked about: the
+// filter decides nothing else, since the response drops addresses without
+// sales anyway. A dense radius holds thousands of addresses but a few hundred
+// sales, and BBR is asked a hundred ids at a time.
+func (s *server) fillPropertyKinds(addrs []*Address, sales [][]Sale) {
+	if s.bbr == nil {
+		return
+	}
+	var needed []*Address
+	for i, a := range addrs {
+		if i == 0 || len(sales[i]) > 0 {
+			needed = append(needed, a)
+		}
+	}
+	if err := s.bbr.FillKinds(needed); err != nil {
+		log.Printf("BBR property types unavailable, filtering on Boliga's alone: %v", err)
+	}
 }
 
 func (s *server) handleLookup() http.HandlerFunc {
@@ -244,7 +272,10 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 		p.AddWarning(w)
 	}
 
-	addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
+	s.fillPropertyKinds(addrs, sales)
+	endStage("bbr")
+
+	addrs, sales = FilterAddressesByProperty(addr.PropertyKind(), addrs, sales)
 
 	luResp, err := FormatLookupResponse(addrs, rangeMap, sales, filter)
 	endStage("format")
@@ -638,7 +669,8 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			// handle error
 		}
 
-		addrs, sales = FilterAddressesByProperty(addr.BoligaPropertyKind, addrs, sales)
+		s.fillPropertyKinds(addrs, sales)
+		addrs, sales = FilterAddressesByProperty(addr.PropertyKind(), addrs, sales)
 
 		info, err := FormatLookupResponse(addrs, ranges, sales, 0)
 		if err != nil {
