@@ -36,8 +36,17 @@ async function startSearch() {
   return hook;
 }
 
+// persisted is what tells a page put into the back/forward cache apart from
+// one being discarded. Set on a plain Event so the test does not depend on the
+// DOM implementation's PageTransitionEvent.
+function leavePage(persisted: boolean) {
+  const e = new Event("pagehide");
+  Object.defineProperty(e, "persisted", { value: persisted });
+  window.dispatchEvent(e);
+}
+
 function closeTab() {
-  window.dispatchEvent(new Event("pagehide"));
+  leavePage(false);
 }
 
 it("cancels a running lookup when the tab is closed", async () => {
@@ -49,6 +58,14 @@ it("cancels a running lookup when the tab is closed", async () => {
   const [url, body] = sendBeacon.mock.calls[0];
   expect(url).toBe("/api/cancel");
   expect(JSON.parse(body)).toEqual({ lookup_id: "abc123" });
+});
+
+it("keeps a lookup the back/forward cache will resume", async () => {
+  await startSearch();
+
+  leavePage(true);
+
+  expect(sendBeacon).not.toHaveBeenCalled();
 });
 
 it("leaves a finished lookup alone", async () => {

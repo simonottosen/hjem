@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-// A tab closed mid-lookup leaves its goroutine running for minutes. Unless
-// cancelling it also gives back its slot, eight abandoned tabs lock everyone
-// out until their lookups finish on their own.
-func TestSessionStoreCancelFreesSlot(t *testing.T) {
+// A tab closed mid-lookup cancels it, but some stages do not watch the context
+// and run on for minutes. The slot is what keeps outbound work under the cap,
+// so it is held until the goroutine has returned — and then given back, or
+// eight abandoned tabs would lock everyone out.
+func TestSessionStoreCancelHoldsSlotUntilLookupReturns(t *testing.T) {
 	st, _ := newTestStore()
 
 	var sessions []*lookupSession
@@ -37,8 +38,24 @@ func TestSessionStoreCancelFreesSlot(t *testing.T) {
 	if _, ok := st.Get(sessions[0].ID); ok {
 		t.Error("the cancelled session is still readable")
 	}
+	if st.Cancel(sessions[0].ID) {
+		t.Error("a second cancel reported cancelling it again")
+	}
+
+	// Still running as far as anyone knows, so still under the cap — also when
+	// its own client starts a new search naming it as the previous one.
+	if _, err := st.Create(sessions[0].ID); !errors.Is(err, ErrTooManySessions) {
+		t.Fatalf("while the cancelled lookup may still run: got err %v, want ErrTooManySessions", err)
+	}
+
+	st.Release(sessions[1]) // never cancelled: must stay
+	if _, ok := st.Get(sessions[1].ID); !ok {
+		t.Error("Release dropped a session nobody cancelled")
+	}
+
+	st.Release(sessions[0])
 	if _, err := st.Create(""); err != nil {
-		t.Fatalf("a cancelled session is still consuming a slot: %v", err)
+		t.Fatalf("the cancelled lookup has returned but its slot was not given back: %v", err)
 	}
 }
 

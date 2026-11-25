@@ -21,10 +21,14 @@ export function useSearch() {
   // few concurrent slots until it finishes on its own — minutes, for a large
   // radius. pagehide rather than beforeunload or unload: it is the one event
   // mobile browsers reliably fire when a tab goes away, and listening for it
-  // does not keep the page out of the back/forward cache. A page that is then
-  // restored from that cache finds its lookup gone and is told to search again.
+  // does not keep the page out of the back/forward cache. It also fires when
+  // the page goes into that cache, though, marked persisted: that page is kept
+  // whole and resumes polling on Back or Forward, so its lookup is left running.
   useEffect(() => {
-    const onPageHide = () => {
+    const onPageHide = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        return;
+      }
       if (inFlightRef.current && lookupIdRef.current) {
         cancelLookup(lookupIdRef.current);
       }

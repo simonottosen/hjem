@@ -150,6 +150,9 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Releases the context once this lookup is done one way or another.
 	// Nothing reads it after we return, so cancelling here is free.
 	defer sess.cancel()
+	// Hands back the slot of a lookup its client cancelled, now that the work
+	// has actually stopped. See sessionStore.Cancel.
+	defer s.sessions.Release(sess)
 
 	p := sess.Progress
 
