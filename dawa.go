@@ -488,7 +488,13 @@ func (c dawaCacher) safeCreateOrGetAddrs(addrs []*Address) error {
 	// DawaUUID is the key, because DawaID is a formatted address string: the
 	// smallest disagreement between DAR and DAWA over a comma or a floor
 	// abbreviation made the same physical address look new and get inserted
-	// twice. DawaID is only still matched for the rows that predate the column.
+	// twice.
+	//
+	// DawaID is still the fallback, and for every row rather than only those
+	// that predate the column: DAR retires an address and registers its
+	// successor under the same designation with a new id, and the column is
+	// unique, so an address matched on the id alone would be inserted a second
+	// time and fail the whole batch.
 	byUUID := map[string]*Address{}
 	byID := map[string]*Address{}
 	for i := 0; i < r; i++ {
@@ -511,8 +517,8 @@ func (c dawaCacher) safeCreateOrGetAddrs(addrs []*Address) error {
 
 		for j, _ := range tempAddrs {
 			a := tempAddrs[j]
+			byID[a.DawaID] = a
 			if a.DawaUUID == "" {
-				byID[a.DawaID] = a
 				continue
 			}
 
@@ -525,21 +531,30 @@ func (c dawaCacher) safeCreateOrGetAddrs(addrs []*Address) error {
 	}
 
 	var createAddrs []*Address
+	// The designations this batch will insert, so a second address under the
+	// same one resolves to the first instead of being inserted beside it.
+	creating := map[string]*Address{}
 	for i, _ := range addrs {
 		a := addrs[i]
 		// byUUID never holds the empty key, so an address without a UUID falls
-		// through to the pre-UUID rows on its own.
+		// through to the DawaID match on its own.
 		exsts, ok := byUUID[a.DawaUUID]
 		if !ok {
 			exsts, ok = byID[a.DawaID]
 		}
 		if !ok {
+			if first, dup := creating[a.DawaID]; dup {
+				addrs[i] = first
+				continue
+			}
+			creating[a.DawaID] = a
 			createAddrs = append(createAddrs, a)
 			continue
 		}
 
-		// Backfill DawaUUID if the cached record is missing it
-		if exsts.DawaUUID == "" && a.DawaUUID != "" {
+		// Take the incoming id when the row has none, or has the one DAR
+		// retired: the public valuation is looked up by it.
+		if a.DawaUUID != "" && exsts.DawaUUID != a.DawaUUID {
 			exsts.DawaUUID = a.DawaUUID
 			c.db.Save(exsts)
 		}

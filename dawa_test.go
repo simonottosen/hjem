@@ -354,6 +354,63 @@ func TestSafeCreateOrGetAddrsBackfillsPreUUIDRow(t *testing.T) {
 	}
 }
 
+// DAR retires an address and registers a new one under the same designation,
+// so a row keyed on the old id meets an incoming address with a new id and the
+// same text. Matching on the id alone made that address look new, and the
+// insert then failed on the unique dawa_id — failing every lookup whose radius
+// covered it, since a failed search caches nothing to get past it next time.
+func TestSafeCreateOrGetAddrsAdoptsReissuedUUID(t *testing.T) {
+	c := NewDawaCacher(newTestDB(t))
+
+	old := []*Address{{DawaUUID: "uuid-retired", DawaID: "Flensborggade 40, 4. tv, 1669 København V", StreetName: "Flensborggade", StreetNumber: "40", PostalCode: "1669", MunicipalityCode: "0101"}}
+	if err := c.safeCreateOrGetAddrs(old); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	reissued := []*Address{{DawaUUID: "uuid-current", DawaID: "Flensborggade 40, 4. tv, 1669 København V", StreetName: "Flensborggade", StreetNumber: "40", PostalCode: "1669", MunicipalityCode: "0101"}}
+	if err := c.safeCreateOrGetAddrs(reissued); err != nil {
+		t.Fatalf("resolve reissued address: %v", err)
+	}
+
+	if n := countAddrs(t, c.db); n != 1 {
+		t.Fatalf("%d address rows, want 1", n)
+	}
+	if reissued[0].ID != old[0].ID {
+		t.Errorf("resolved to row %d, want the existing row %d", reissued[0].ID, old[0].ID)
+	}
+
+	// The current id, because it is what later lookups by id are made with:
+	// the public valuation is fetched by it.
+	var row Address
+	if err := c.db.First(&row, old[0].ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.DawaUUID != "uuid-current" {
+		t.Errorf("row has DawaUUID %q, want the current %q", row.DawaUUID, "uuid-current")
+	}
+}
+
+// The same designation twice in one batch, under two ids, is inserted once:
+// two rows cannot share a dawa_id, and one failed row fails the whole batch.
+func TestSafeCreateOrGetAddrsInsertsADesignationOnce(t *testing.T) {
+	c := NewDawaCacher(newTestDB(t))
+
+	addrs := []*Address{
+		{DawaUUID: "uuid-a", DawaID: "Testvej 1, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+		{DawaUUID: "uuid-b", DawaID: "Testvej 1, 8000 Aarhus C", StreetName: "Testvej", StreetNumber: "1", PostalCode: "8000", MunicipalityCode: "0751"},
+	}
+	if err := c.safeCreateOrGetAddrs(addrs); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	if n := countAddrs(t, c.db); n != 1 {
+		t.Fatalf("%d address rows, want 1", n)
+	}
+	if addrs[0].ID == 0 || addrs[1].ID != addrs[0].ID {
+		t.Errorf("resolved to rows %d and %d, want one shared row", addrs[0].ID, addrs[1].ID)
+	}
+}
+
 // TestAddressMigrationToleratesPreUUIDRows pins why the unique index is partial.
 // Every deployment that predates DawaUUID holds rows with an empty one, and a
 // plain unique index would reject the lot on the first boot after this change.
