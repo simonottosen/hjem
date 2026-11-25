@@ -11,6 +11,10 @@ import type { FeatureCollection } from "geojson";
 import type { GeoJSONSource, LngLatBoundsLike, Map as MapLibreMap } from "maplibre-gl";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+// maplibre 6 no longer inlines its worker: it looks for maplibre-gl-worker.mjs
+// beside whichever file imported it, which after bundling is our chunk in
+// /dist/, where nothing put it. Vite bundles it and hands back where it went.
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type { MapProgress } from "@/lib/types";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { streetKey } from "@/lib/boliga";
@@ -19,6 +23,8 @@ import { streetKey } from "@/lib/boliga";
 // filter would have washed out the orange dots too: they render into the same
 // WebGL canvas as the basemap.
 const STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
+
+maplibregl.setWorkerUrl(workerUrl);
 
 const ORANGE = "#f97316";
 const DOT_RADIUS = 2.6;
