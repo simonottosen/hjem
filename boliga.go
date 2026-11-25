@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -306,6 +307,42 @@ func (bc *boligaCacher) FetchSales(addrs []*Address, progress *Progress, stats *
 		// could run before both inserts and leave every sale stored twice.
 		bc.storeMu.Lock()
 		err = bc.db.Transaction(func(tx *gorm.DB) error {
+			// The lock orders the writes, not the fetches. A lookup that asked
+			// Boliga first can get its answer last, after a later fetch of the
+			// same street has been stored, and writing it then would move the
+			// stamp back in time and put back sales Boliga has since added to.
+			// So an address stamped after this fetch is left as it is stored,
+			// and this lookup's own copy takes the stored row: its fetched
+			// sales go too, and the cached read below returns the stored ones.
+			newer := make(map[uint]*Address)
+			for start := 0; start < len(refreshed); start += collapseBatch {
+				var rows []*Address
+				if err := tx.Where("id IN ?", refreshed[start:min(start+collapseBatch, len(refreshed))]).Find(&rows).Error; err != nil {
+					return err
+				}
+				for _, a := range rows {
+					if a.BoligaCollectedAt.After(fetchTime) {
+						newer[a.ID] = a
+					}
+				}
+			}
+			if len(newer) > 0 {
+				refreshed = slices.DeleteFunc(refreshed, func(id uint) bool { return newer[id] != nil })
+				salesToStore = slices.DeleteFunc(salesToStore, func(s Sale) bool { return newer[s.AddrID] != nil })
+				addrsToStore = slices.DeleteFunc(addrsToStore, func(a *Address) bool { return newer[a.ID] != nil })
+				for _, a := range candidates {
+					if stored := newer[a.ID]; stored != nil {
+						*a = *stored
+					}
+				}
+				for j, a := range addrsToFetch {
+					if newer[a.ID] != nil {
+						sales[ids[j]] = nil
+						cachedAddrs[ids[j]] = a
+					}
+				}
+			}
+
 			for start := 0; start < len(refreshed); start += collapseBatch {
 				batch := refreshed[start:min(start+collapseBatch, len(refreshed))]
 				if err := tx.Where("addr_id IN ?", batch).Delete(&Sale{}).Error; err != nil {

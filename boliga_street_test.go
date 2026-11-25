@@ -295,3 +295,85 @@ func TestStoredNeighbourSharingAddressStringIsLeftAlone(t *testing.T) {
 		t.Errorf("the lookup's %s got %v, want the 9,000,000 sale", due4100.DawaID, sales[1])
 	}
 }
+
+// Two lookups fetch the same street at once. The one that started first gets
+// its answer last, and by then the street holds the later fetch's sales and
+// stamp. Writing the older answer over them would put the stamp back in time
+// and bring back sales Boliga had since corrected or added to, so the older
+// fetch leaves those addresses alone and its lookup gets what is stored.
+func TestOlderStreetFetchDoesNotOverwriteNewer(t *testing.T) {
+	a1 := onStreet("Gade", "1", time.Time{})
+	a2 := onStreet("Gade", "2", time.Time{})
+	bc := seedCacher(t, []*Address{a1, a2})
+
+	type result struct {
+		sales [][]Sale
+		err   error
+	}
+	blocking := func(entered chan<- time.Time, release <-chan struct{}, items ...BoligaSaleItem) BoligaStreetFetcher {
+		return func([]BoligaPropertyRequest, *Progress, *HealthStats) ([]BoligaSaleItem, []BoligaStreetFailure, error) {
+			entered <- time.Now()
+			<-release
+			return items, nil, nil
+		}
+	}
+	run := func(addrs []*Address, fetch BoligaStreetFetcher) <-chan result {
+		done := make(chan result, 1)
+		go func() {
+			s, _, err := bc.FetchSales(addrs, NewProgress(), NewHealthStats(), fetch)
+			done <- result{s, err}
+		}()
+		return done
+	}
+
+	older, newer := reload(t, bc, a1, a2), reload(t, bc, a1, a2)
+	olderIn, olderGo := make(chan time.Time, 1), make(chan struct{})
+	newerIn, newerGo := make(chan time.Time, 1), make(chan struct{})
+
+	olderDone := run(older, blocking(olderIn, olderGo, soldAt(a1, 1_000_000)))
+	olderAt := <-olderIn
+	// The newer fetch has to be stamped strictly later than the older one.
+	for !time.Now().After(olderAt) {
+	}
+	newerDone := run(newer, blocking(newerIn, newerGo, soldAt(a1, 2_000_000), soldAt(a2, 2_200_000)))
+	<-newerIn
+	close(newerGo)
+	if r := <-newerDone; r.err != nil {
+		t.Fatalf("newer FetchSales: %v", r.err)
+	}
+	stamp := newer[0].BoligaCollectedAt
+	close(olderGo)
+	r := <-olderDone
+	if r.err != nil {
+		t.Fatalf("older FetchSales: %v", r.err)
+	}
+
+	for _, a := range reload(t, bc, a1, a2) {
+		if !a.BoligaCollectedAt.Equal(stamp) {
+			t.Errorf("%s stamped %v, want the newer fetch's %v", a.DawaID, a.BoligaCollectedAt, stamp)
+		}
+	}
+	for _, c := range []struct {
+		a    *Address
+		want []int
+	}{{a1, []int{2_000_000}}, {a2, []int{2_200_000}}} {
+		var amounts []int
+		for _, s := range storedSales(t, bc, c.a) {
+			amounts = append(amounts, s.AmountDKK)
+		}
+		if fmt.Sprint(amounts) != fmt.Sprint(c.want) {
+			t.Errorf("%s holds sales %v, want the newer fetch's %v", c.a.DawaID, amounts, c.want)
+		}
+	}
+
+	// The older lookup still answers, with what is stored now.
+	for i, want := range []int{2_000_000, 2_200_000} {
+		if len(r.sales[i]) != 1 || r.sales[i][0].AmountDKK != want {
+			t.Errorf("the older lookup got %v for %s, want the stored %d sale", r.sales[i], older[i].DawaID, want)
+		}
+		if !older[i].BoligaCollectedAt.Equal(stamp) {
+			t.Errorf("the older lookup's copy of %s says %v, want the stored %v",
+				older[i].DawaID, older[i].BoligaCollectedAt, stamp)
+		}
+	}
+}
