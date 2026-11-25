@@ -255,6 +255,33 @@ func (st *sessionStore) Get(id string) (*lookupSession, bool) {
 	return sess, ok
 }
 
+// Cancel abandons an in-flight session, reporting whether there was one. It is
+// what a closed tab sends: nobody is left to read the result, so the slot under
+// maxActiveSessions goes back at once rather than when the lookup finishes.
+//
+// Deleting is what returns the slot, not cancelling. runLookup only notices
+// cancellation between stages, and some stages — the server-side Boliga
+// fetch, Dingeo — do not watch the context at all, so the goroutine can carry
+// on for minutes. It no longer counts against the cap while it does, and what
+// it eventually writes lands in a Progress nobody can reach.
+//
+// A finished session is left alone. It holds no slot, and the browser cannot
+// know exactly when it finished — the page holds a delivered result back for
+// a moment so the map can settle — so a tab closed in that moment would
+// otherwise throw away the result that finishedSessionTTL keeps for a reload.
+func (st *sessionStore) Cancel(id string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	sess, ok := st.sessions[id]
+	if !ok || sess.Progress.Finished() {
+		return false
+	}
+	sess.cancel()
+	delete(st.sessions, id)
+	return true
+}
+
 // evictLocked drops finished sessions past their TTL and cancels in-flight
 // ones that have exceeded maxLookupDuration. Eviction is driven by Create and
 // Get rather than a background ticker: the map only grows when it is touched,

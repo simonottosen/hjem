@@ -92,3 +92,13 @@ export async function fetchProgress(lookupId: string): Promise<ProgressEvent> {
   }
   return data;
 }
+
+// Tell the server we have walked away from a lookup, so it stops holding one
+// of its few concurrent slots for a result nobody will read. A beacon because
+// this runs as the page is being closed: an ordinary fetch is cancelled along
+// with the page, a beacon is queued by the browser and delivered afterwards.
+// It cannot set a JSON content type on a string body, so the server accepts
+// any.
+export function cancelLookup(lookupId: string): void {
+  navigator.sendBeacon("/api/cancel", JSON.stringify({ lookup_id: lookupId }));
+}
