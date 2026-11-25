@@ -84,6 +84,10 @@ type lookupSession struct {
 	cancel    context.CancelFunc
 	createdAt time.Time
 
+	// abandoned marks a session cancelled by its own client while its lookup
+	// may still be running. Guarded by sessionStore.mu. See Cancel.
+	abandoned bool
+
 	// boligaIngest carries the browser's fetched sales to the waiting lookup
 	// goroutine. Buffered so the HTTP handler can hand off and return without
 	// caring whether anyone is still listening — a POST that arrives after the
@@ -213,7 +217,9 @@ func (st *sessionStore) Create(previousID string) (*lookupSession, error) {
 
 	st.evictLocked()
 
-	if prev, ok := st.sessions[previousID]; ok {
+	// An abandoned one is already cancelled and keeps its slot until its
+	// goroutine returns; see Cancel.
+	if prev, ok := st.sessions[previousID]; ok && !prev.abandoned {
 		prev.cancel()
 		delete(st.sessions, previousID)
 	}
@@ -252,7 +258,52 @@ func (st *sessionStore) Get(id string) (*lookupSession, bool) {
 	st.evictLocked()
 
 	sess, ok := st.sessions[id]
+	if ok && sess.abandoned {
+		return nil, false
+	}
 	return sess, ok
+}
+
+// Cancel abandons an in-flight session, reporting whether there was one. It is
+// what a closed tab sends: nobody is left to read the result, so the lookup is
+// told to stop and its id stops answering at once.
+//
+// Its slot under maxActiveSessions is not given back here, only by Release
+// once the lookup goroutine has actually returned. runLookup notices
+// cancellation only between stages, and some stages — the DAR radius search,
+// the server-side Boliga fetch, Dingeo — do not watch the context at all, so
+// the goroutine can carry on for minutes. Freeing the slot while it does would
+// let a closed tab's work and a newly admitted lookup run side by side past
+// the cap the slot exists to enforce. A goroutine that never returns is still
+// bounded by maxLookupDuration in evictLocked.
+//
+// A finished session is left alone. It holds no slot, and the browser cannot
+// know exactly when it finished — the page holds a delivered result back for
+// a moment so the map can settle — so a tab closed in that moment would
+// otherwise throw away the result that finishedSessionTTL keeps for a reload.
+func (st *sessionStore) Cancel(id string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	sess, ok := st.sessions[id]
+	if !ok || sess.abandoned || sess.Progress.Finished() {
+		return false
+	}
+	sess.cancel()
+	sess.abandoned = true
+	return true
+}
+
+// Release is called by the lookup goroutine on its way out, and drops the
+// session if its client abandoned it — the point at which its slot is really
+// free. A session nobody cancelled is left to finishedSessionTTL as usual.
+func (st *sessionStore) Release(sess *lookupSession) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	if sess.abandoned && st.sessions[sess.ID] == sess {
+		delete(st.sessions, sess.ID)
+	}
 }
 
 // evictLocked drops finished sessions past their TTL and cancels in-flight

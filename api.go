@@ -152,6 +152,9 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Releases the context once this lookup is done one way or another.
 	// Nothing reads it after we return, so cancelling here is free.
 	defer sess.cancel()
+	// Hands back the slot of a lookup its client cancelled, now that the work
+	// has actually stopped. See sessionStore.Cancel.
+	defer s.sessions.Release(sess)
 
 	p := sess.Progress
 
@@ -547,6 +550,43 @@ func (s *server) handleBoligaIngest() http.HandlerFunc {
 	}
 }
 
+func (s *server) handleCancel() http.HandlerFunc {
+	type Request struct {
+		LookupID string `json:"lookup_id"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			replyJSONErr(w, errors.New("kun POST er tilladt"), http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Content-Type is deliberately not checked. The caller is a page being
+		// closed, and navigator.sendBeacon — the only request a browser still
+		// delivers then — labels a string body text/plain with no way to say
+		// otherwise.
+		body := http.MaxBytesReader(w, r.Body, maxBytesLimit)
+		defer body.Close()
+
+		var req Request
+		if err := json.NewDecoder(body).Decode(&req); err != nil {
+			replyJSONErr(w, err, http.StatusBadRequest)
+			return
+		}
+
+		// The id alone is enough, as it is for reading the result: it is
+		// unguessable, and holding it is what shows the caller started this
+		// lookup.
+		if !s.sessions.Cancel(req.LookupID) {
+			replyJSONErr(w, ErrUnknownSession, http.StatusNotFound)
+			return
+		}
+		log.Printf("Lookup %s abandoned by its client; cancelled", shortLookupID(req.LookupID))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func (s *server) handleCSVDownload() http.HandlerFunc {
 	type Request struct {
 		Query  string `json:"q"`
@@ -707,6 +747,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/boliga/ingest", s.handleBoligaIngest())
 	mux.HandleFunc("/api/health", s.handleHealth())
 	mux.HandleFunc("/metrics", s.handleMetrics())
+	mux.HandleFunc("/api/cancel", s.handleCancel())
 	mux.HandleFunc("/download/csv", s.handleCSVDownload())
 
 	return mux
