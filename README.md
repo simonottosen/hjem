@@ -87,7 +87,7 @@ docker run -p 8080:8080 -v $(pwd)/data:/data ghcr.io/simonottosen/hjem
 
 ### With PostgreSQL
 
-Set `POSTGRES_PASSWORD` to switch from SQLite to PostgreSQL. The server attempts a PostgreSQL connection on startup and falls back to SQLite if the connection fails.
+Set `POSTGRES_PASSWORD` to switch from SQLite to PostgreSQL. The server retries the connection for about 15 seconds on startup and then exits if PostgreSQL is still unreachable — it does not fall back to SQLite, so run it with a restart policy (e.g. `--restart unless-stopped`) if the database may come up after it.
 
 ```shell
 docker run -p 8080:8080 \
