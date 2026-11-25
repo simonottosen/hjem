@@ -3,11 +3,13 @@ import { ExternalLink } from "lucide-react";
 import { useSearch } from "@/hooks/useSearch";
 import { useProgress } from "@/hooks/useProgress";
 import { useFilteredData } from "@/hooks/useFilteredData";
+import { useStoredResult, writeSearchLink, type SearchLink } from "@/hooks/useStoredResult";
 import { SearchForm } from "@/components/SearchForm";
 import { ProgressBar } from "@/components/ProgressBar";
 import { ProgressMap } from "@/components/ProgressMap";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { DashboardLayout } from "@/components/DashboardLayout";
+import { StoredResultBanner } from "@/components/StoredResultBanner";
 
 function Footer() {
   return (
@@ -37,6 +39,9 @@ export default function App() {
   const [filter, setFilter] = useState("1");
   const [range, setRange] = useState("250");
   const [hasSearched, setHasSearched] = useState(false);
+  // When the result on screen was made, if it came from a link rather than a
+  // search run just now.
+  const [storedAt, setStoredAt] = useState<string | null>(null);
 
   // Address exclusion state
   const [excludedAddrs, setExcludedAddrs] = useState<Set<number>>(new Set());
@@ -65,15 +70,53 @@ export default function App() {
   const foundNoSales = !!data && (data.sales?.length ?? 0) === 0;
   const hasResults = !isLoading && !error && !!filteredData && !foundNoSales;
 
+  // Takes the search as arguments rather than reading the form state, which a
+  // link has only just asked React to set.
+  const runSearch = useCallback(
+    (link: Required<SearchLink>) => {
+      setHasSearched(true);
+      setExcludedAddrs(new Set());
+      setStoredAt(null);
+      reset();
+      // The address goes into the URL now, so a reload mid-lookup searches
+      // again; the stored id joins it once there is one.
+      writeSearchLink(link);
+      search(link.query, Number(link.range), Number(link.filter), (session) => {
+        startPolling(
+          session,
+          (result) => {
+            setResult(result);
+            writeSearchLink(link, result.result_id);
+          },
+          setSearchError
+        );
+      });
+    },
+    [search, reset, startPolling, setResult, setSearchError]
+  );
+
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
-    setHasSearched(true);
-    setExcludedAddrs(new Set());
-    reset();
-    search(query, Number(range), Number(filter), (session) => {
-      startPolling(session, setResult, setSearchError);
-    });
-  }, [query, range, filter, search, reset, startPolling, setResult, setSearchError]);
+    runSearch({ query, range, filter });
+  }, [query, range, filter, runSearch]);
+
+  const linkPending = useStoredResult(
+    (stored) => {
+      setQuery(stored.query);
+      setRange(String(stored.ranges[0] ?? range));
+      setFilter(String(stored.filter));
+      setHasSearched(true);
+      setStoredAt(stored.created_at);
+      setResult(stored.result);
+    },
+    (link) => {
+      const full = { query: link.query, range: link.range ?? range, filter: link.filter ?? filter };
+      setQuery(full.query);
+      setRange(full.range);
+      setFilter(full.filter);
+      runSearch(full);
+    }
+  );
 
   const searchFormProps = {
     query,
@@ -83,7 +126,7 @@ export default function App() {
     onFilterChange: setFilter,
     onRangeChange: setRange,
     onSearch: handleSearch,
-    isLoading,
+    isLoading: isLoading || linkPending,
   };
 
   // Before first search ever: centered landing page
@@ -103,6 +146,9 @@ export default function App() {
             </p>
           </div>
           <SearchForm {...searchFormProps} />
+          {linkPending && (
+            <p className="text-center text-sm text-muted-foreground">Henter gemt resultat...</p>
+          )}
           <Footer />
         </div>
       </div>
@@ -133,6 +179,10 @@ export default function App() {
         )}
 
         {!isLoading && error && <ErrorAlert error={error} />}
+
+        {/* Not gated on sales: a linked lookup that found none is just as
+            old, and "nothing sold here" can stop being true within a month. */}
+        {!isLoading && !error && data && storedAt && <StoredResultBanner createdAt={storedAt} />}
 
         {!isLoading && !error && foundNoSales && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">

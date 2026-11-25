@@ -79,7 +79,19 @@ export interface LookupResponse {
   // When the least recently checked address in the radius was fetched from
   // Boliga. Absent when none has been fetched.
   sales_fetched_at?: string;
+  // The id this result was stored under, for a link that shows it again.
+  // Absent when the server could not store it.
+  result_id?: string;
   error?: string;
+}
+
+// What GET /api/result returns: a finished lookup, and the search that made it.
+export interface StoredLookup {
+  query: string;
+  ranges: number[];
+  filter: number;
+  created_at: string;
+  result: LookupResponse;
 }
 
 export type ProgressStage =
