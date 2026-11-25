@@ -185,9 +185,8 @@ func TestExpiredAddressWithoutSaleIsRestamped(t *testing.T) {
 }
 
 // The other side of restamping: an address whose street failed was not
-// checked, and an expired one has already had its sales deleted, so a fresh
-// stamp would show it with no sales for a whole TTL. It has to stay due and be
-// retried by the next search.
+// checked, so a fresh stamp would hide that for a whole TTL. It has to stay due
+// and be retried by the next search.
 func TestAddressOnFailedStreetStaysDue(t *testing.T) {
 	stale := time.Now().Add(-2 * cacheExpiry)
 	addrs := []*Address{{
