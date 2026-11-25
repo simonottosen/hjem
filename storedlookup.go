@@ -34,6 +34,9 @@ type StoredLookup struct {
 	Filter    int
 	Result    string    `gorm:"not null"`
 	CreatedAt time.Time `gorm:"index"`
+	// Area is the drawn polygon of an area search as JSON, empty for a radius
+	// search. Nullable, so adding it leaves the rows written before it alone.
+	Area string
 }
 
 type lookupStore struct {
@@ -58,7 +61,7 @@ func newLookupStore(db *gorm.DB) *lookupStore {
 // Expired rows are pruned here rather than on a timer. Saves are the only
 // thing that grows the table, so pruning alongside them bounds it without a
 // goroutine of its own.
-func (ls *lookupStore) Save(ctx context.Context, query string, ranges []int, filter int, resp *LookupResponse) error {
+func (ls *lookupStore) Save(ctx context.Context, query string, ranges []int, area []lonLat, filter int, resp *LookupResponse) error {
 	if err := ls.db.WithContext(ctx).Where("created_at < ?", time.Now().Add(-storedLookupTTL)).Delete(&StoredLookup{}).Error; err != nil {
 		log.Printf("Pruning stored lookups failed: %v", err)
 	}
@@ -81,6 +84,14 @@ func (ls *lookupStore) Save(ctx context.Context, query string, ranges []int, fil
 		Ranges: strings.Join(rs, ","),
 		Filter: filter,
 		Result: string(result),
+	}
+	if area != nil {
+		a, err := json.Marshal(area)
+		if err != nil {
+			resp.ResultID = ""
+			return err
+		}
+		row.Area = string(a)
 	}
 	err = ls.db.WithContext(ctx).Create(&row).Error
 
@@ -127,6 +138,7 @@ func (s *server) handleResult() http.HandlerFunc {
 	type Reply struct {
 		Query     string          `json:"query"`
 		Ranges    []int           `json:"ranges"`
+		Area      json.RawMessage `json:"area,omitempty"`
 		Filter    int             `json:"filter"`
 		CreatedAt time.Time       `json:"created_at"`
 		Result    json.RawMessage `json:"result"`
@@ -151,6 +163,7 @@ func (s *server) handleResult() http.HandlerFunc {
 		replyJSON(w, Reply{
 			Query:     row.Query,
 			Ranges:    ranges,
+			Area:      json.RawMessage(row.Area),
 			Filter:    row.Filter,
 			CreatedAt: row.CreatedAt,
 			Result:    json.RawMessage(row.Result),

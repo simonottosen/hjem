@@ -20,6 +20,8 @@ package hjem
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,6 +262,9 @@ type DARNearbySearch struct {
 	Meters   int
 	Segments int  // polygon vertex count; 0 → default (64)
 	KeepAll  bool // include non-current (historic/invalid) addresses
+	// Area, when set, is searched instead of the circle, and Meters and
+	// Segments are ignored. It must have been through validateArea.
+	Area []lonLat
 }
 
 func (d DARNearbySearch) segments() int {
@@ -281,11 +286,23 @@ func addrLatLon(a Address) (lat, lon float64) {
 // parameters. It is used ONLY as a cache key by dawaCacher; the real network
 // call is a GraphQL POST built in Fetch. The distinct host keeps DAR cache
 // entries separate from DAWA ones.
+//
+// An area is keyed by a hash of its WKT rather than by the WKT itself: the URL
+// is the primary key of DawaQueryCache, and two hundred vertices spelled out
+// would overrun Postgres's limit on a btree index entry. The hash is of the
+// polygon alone, not the searched address, because the addresses inside an
+// area do not depend on which of them the user asked about.
 func (d DARNearbySearch) Request() *http.Request {
 	req, _ := http.NewRequest("GET", darGraphQLDefaultURL, nil)
-	lat, lon := addrLatLon(d.Addr)
 	q := req.URL.Query()
 	q.Add("src", "dar")
+	if d.Area != nil {
+		sum := sha256.Sum256([]byte(areaWKT(d.Area)))
+		q.Add("area", hex.EncodeToString(sum[:]))
+		req.URL.RawQuery = q.Encode()
+		return req
+	}
+	lat, lon := addrLatLon(d.Addr)
 	q.Add("lat", strconv.FormatFloat(lat, 'f', 7, 64))
 	q.Add("lon", strconv.FormatFloat(lon, 'f', 7, 64))
 	q.Add("meters", strconv.Itoa(d.Meters))
@@ -325,11 +342,17 @@ func (d DARNearbySearch) Fetch() ([]*Address, error) {
 		return nil, err
 	}
 
-	lat, lon := addrLatLon(d.Addr)
-	wkt := circlePolygonWKT(lat, lon, float64(d.Meters), d.segments())
+	var wkt string
+	if d.Area != nil {
+		wkt = areaWKT(d.Area)
+		log.Printf("Fetching DAR GraphQL: drawn area of %d points, %.2f km²", len(d.Area), areaKM2(d.Area))
+	} else {
+		lat, lon := addrLatLon(d.Addr)
+		wkt = circlePolygonWKT(lat, lon, float64(d.Meters), d.segments())
+		log.Printf("Fetching DAR GraphQL: radius %dm around %.6f,%.6f (%d-gon)", d.Meters, lat, lon, d.segments())
+	}
 	// DAR is bitemporal: query the current registration/effect snapshot.
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000") + "Z"
-	log.Printf("Fetching DAR GraphQL: radius %dm around %.6f,%.6f (%d-gon)", d.Meters, lat, lon, d.segments())
 	log.Printf("DAR polygon (EPSG:25832): %s", truncate(wkt, 160))
 
 	// Step 1: access points within the polygon. Collect ids regardless of

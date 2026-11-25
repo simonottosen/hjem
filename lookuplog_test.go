@@ -55,7 +55,7 @@ func TestFailedLookupIsLogged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	s.runLookup(sess, "Flensborggade 40, 4. tv", []int{250}, 0)
+	s.runLookup(sess, "Flensborggade 40, 4. tv", []int{250}, nil, 0)
 
 	lines := lookupLines(logged.String())
 	if len(lines) != 1 {

@@ -164,7 +164,8 @@ Request body:
 | Field | Type | Description |
 |-------|------|-------------|
 | `q` | string | Danish address query string (see [Address resolution](#address-resolution)) |
-| `ranges` | array of int | Search radii in metres, e.g. `[250, 500]` |
+| `ranges` | array of int | Search radii in metres, e.g. `[250, 500]`. Send either `ranges` or `area` |
+| `area` | array of `[lon, lat]` | A drawn polygon searched instead of a radius, e.g. `[[12.550, 55.670], [12.555, 55.670], [12.5525, 55.673]]`. 3–200 distinct vertices once rounded to 5 decimals (a point repeating the one before it, such as a closing repeat of the first, is dropped), inside Denmark, not self-intersecting, and between 100 m² and π·1000² m² (≈3.14 km², the largest radius search) |
 | `filter_below_std` | int | IQR multiplier for outlier filtering. `0` disables filtering. `1` uses multiplier `1.5` (strict), `2` uses `2.0`, `3` uses `2.5` (lenient) |
 | `previous_lookup_id` | string | Optional. The caller's own previous `lookup_id`; that lookup is cancelled. Other clients' lookups are unaffected |
 
@@ -246,9 +247,23 @@ A Grafana dashboard is available at `grafana/dashboard.json`.
 
 Downloads all sales for a given address and radius as a CSV file.
 
-Query parameters: `q` (address string) and `range` (radius in metres).
+Query parameters: `q` (address string) and `range` (radius in metres), or `a` in place of `range` — a drawn area as a [Google encoded polyline](https://developers.google.com/maps/documentation/utilities/polylinealgorithm) at precision 5, held to the same limits as `area` on a lookup.
 
 Example: `/download/csv?q=Palnatokesvej+34+5000&range=500`
+
+### `GET /api/locate?q=<address>`
+
+Resolves an address to a point, so the page can centre its map before the user draws an area. Not counted against the per-client lookup limit; the answer is cached like a lookup's own address resolution.
+
+```json
+{ "address": "Flensborggade 40, 4. tv, 1669 København V", "lat": 55.6700, "lon": 12.5500 }
+```
+
+`400` for a blank query, `404` when nothing matches, `409` when the match is not unique.
+
+### `GET /api/result?id=<result_id>`
+
+Returns a stored lookup by its share id: `{query, ranges, area, filter, created_at, result}`. `area` is present only for an area search, in the same `[lon, lat]` shape the lookup was sent.
 
 ## How the Three Estimates Work
 
@@ -359,6 +374,7 @@ go test ./...
 ```
 .
 ├── api.go           # HTTP routes and lookup orchestration
+├── area.go          # Drawn-area search: validation, WKT, polyline decoding
 ├── boliga.go        # Boliga.dk scraper with 3-day DB caching
 ├── comps.go         # Gaussian-weighted comparable sales estimation
 ├── adressevaelger.go # Adressevælgeren free-text search and address enrichment

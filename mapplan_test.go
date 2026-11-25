@@ -41,7 +41,7 @@ func TestMapPlanPlotsEachBuildingOnce(t *testing.T) {
 		mapAddr("Istedgade", "12", "1650", 55.6711, 12.5512),
 	}
 
-	plan := buildMapPlan(primary, addrs, []int{250, 500})
+	plan := buildMapPlan(primary, addrs, []int{250, 500}, nil)
 
 	if plan.RadiusM != 500 {
 		t.Errorf("radius = %d, want the widest requested range 500", plan.RadiusM)
@@ -61,7 +61,7 @@ func TestMapPlanExcludesTheSearchedProperty(t *testing.T) {
 		mapAddr("Flensborggade", "42", "1669", 55.6701, 12.5501),
 	}
 
-	plan := buildMapPlan(primary, addrs, []int{250})
+	plan := buildMapPlan(primary, addrs, []int{250}, nil)
 
 	if plan.Lat != 55.6700 || plan.Lon != 12.5500 {
 		t.Errorf("centre = %v,%v, want the searched property", plan.Lat, plan.Lon)
@@ -84,7 +84,7 @@ func TestMapPlanStreetsAreKeyedAsFetchTasks(t *testing.T) {
 		mapAddr("Sønder Boulevard", "1", "1720", 55.6720, 12.5520),
 	}
 
-	plan := buildMapPlan(primary, addrs, []int{250})
+	plan := buildMapPlan(primary, addrs, []int{250}, nil)
 
 	fetchable := map[BoligaPropertyRequest]bool{}
 	for _, task := range BoligaStreetTasks(addrs) {
@@ -110,7 +110,7 @@ func TestMapPlanSkipsAddressesWithoutCoordinates(t *testing.T) {
 		mapAddr("Istedgade", "10", "1650", 0, 0),
 	}
 
-	plan := buildMapPlan(primary, addrs, []int{250})
+	plan := buildMapPlan(primary, addrs, []int{250}, nil)
 
 	for _, s := range plan.Streets {
 		if len(s.Points) > 0 {

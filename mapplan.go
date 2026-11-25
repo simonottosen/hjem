@@ -13,6 +13,9 @@ type MapPlan struct {
 	Lon     float64     `json:"lon"`
 	RadiusM int         `json:"radius_m"`
 	Streets []MapStreet `json:"streets"`
+	// Area is the drawn polygon of an area search, which the map frames and
+	// outlines in place of a circle. RadiusM is 0 then.
+	Area []lonLat `json:"area,omitempty"`
 }
 
 type MapStreet struct {
@@ -28,7 +31,8 @@ const mapPointPrecision = 1e5
 
 // buildMapPlan takes the requested radii rather than one radius because a
 // lookup can ask for several at once, and the map has to cover the widest.
-func buildMapPlan(primary *Address, addrs []*Address, ranges []int) *MapPlan {
+// An area search has no radii and passes its polygon instead.
+func buildMapPlan(primary *Address, addrs []*Address, ranges []int, area []lonLat) *MapPlan {
 	// Via addrLatLon because Address stores x in .Latitude and y in .Longtitude
 	// — reading the fields at face value puts Copenhagen in the Indian Ocean.
 	round := func(a *Address) [2]float64 {
@@ -40,7 +44,7 @@ func buildMapPlan(primary *Address, addrs []*Address, ranges []int) *MapPlan {
 	}
 
 	primaryLat, primaryLon := addrLatLon(*primary)
-	plan := &MapPlan{Lat: primaryLat, Lon: primaryLon}
+	plan := &MapPlan{Lat: primaryLat, Lon: primaryLon, Area: area}
 	for _, r := range ranges {
 		plan.RadiusM = max(plan.RadiusM, r)
 	}
