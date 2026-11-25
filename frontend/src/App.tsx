@@ -180,13 +180,15 @@ export default function App() {
 
         {!isLoading && error && <ErrorAlert error={error} />}
 
+        {/* Not gated on sales: a linked lookup that found none is just as
+            old, and "nothing sold here" can stop being true within a month. */}
+        {!isLoading && !error && data && storedAt && <StoredResultBanner createdAt={storedAt} />}
+
         {!isLoading && !error && foundNoSales && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             Ingen sammenlignelige salg fundet i området. Prøv at søge med en større radius.
           </div>
         )}
-
-        {hasResults && storedAt && <StoredResultBanner createdAt={storedAt} />}
 
         {hasResults && (
           <DashboardLayout

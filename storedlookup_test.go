@@ -1,11 +1,14 @@
 package hjem
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func getResult(t *testing.T, s *server, id string) *httptest.ResponseRecorder {
@@ -26,7 +29,7 @@ func TestStoredLookupRoundTrip(t *testing.T) {
 		Sales:        []*JSONSale{{AddrIndex: 0, Amount: 3_100_000, SqMeters: 74}},
 		Warnings:     []string{"en advarsel"},
 	}
-	if err := s.results.Save("Flensborggade 40", []int{500}, 2, resp); err != nil {
+	if err := s.results.Save(context.Background(), "Flensborggade 40", []int{500}, 2, resp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	if len(resp.ResultID) != 32 {
@@ -116,7 +119,7 @@ func TestStoredLookupSavePrunesExpired(t *testing.T) {
 		}
 	}
 
-	if err := s.results.Save("q", []int{250}, 1, &LookupResponse{}); err != nil {
+	if err := s.results.Save(context.Background(), "q", []int{250}, 1, &LookupResponse{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -129,5 +132,37 @@ func TestStoredLookupSavePrunesExpired(t *testing.T) {
 		if id == "expired" {
 			t.Errorf("expired row survived a save: %v", ids)
 		}
+	}
+}
+
+// A lookup replaced while its result is being written has no one left to
+// hand the share id to. Keeping the row would hold an address nobody can
+// reach for a month, so a cancellation that lands during the save must leave
+// nothing behind. Here it lands after the insert has committed, which the
+// context on the query itself cannot undo.
+func TestStoredLookupSaveCancelledLeavesNoRow(t *testing.T) {
+	db := newTestDB(t)
+	s := &server{results: newLookupStore(db)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := db.Callback().Create().After("gorm:commit_or_rollback_transaction").Register("test:cancel", func(*gorm.DB) {
+		cancel()
+	}); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	resp := &LookupResponse{}
+	if err := s.results.Save(ctx, "Flensborggade 40", []int{250}, 1, resp); err == nil {
+		t.Error("Save returned nil for a cancelled lookup, want an error")
+	}
+	if resp.ResultID != "" {
+		t.Errorf("ResultID = %q, want none for a cancelled lookup", resp.ResultID)
+	}
+
+	var n int64
+	db.Model(&StoredLookup{}).Count(&n)
+	if n != 0 {
+		t.Errorf("stored rows = %d, want 0 after a cancelled save", n)
 	}
 }

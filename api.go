@@ -292,8 +292,13 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	}
 
 	// Kept before delivery so the page receives the share id with the
-	// result. A failed save costs the link, not the lookup.
-	if err := s.results.Save(query, ranges, filter, luResp); err != nil {
+	// result. A failed save costs the link, not the lookup — unless it failed
+	// because the lookup was replaced meanwhile, which Save has then undone.
+	if err := s.results.Save(sess.ctx, query, ranges, filter, luResp); err != nil {
+		if cancelled() {
+			log.Printf("Lookup cancelled before result delivery for %q", query)
+			return
+		}
 		log.Printf("Storing result failed for %q: %v", query, err)
 	}
 

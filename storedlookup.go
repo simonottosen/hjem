@@ -1,6 +1,7 @@
 package hjem
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -51,11 +52,14 @@ func newLookupStore(db *gorm.DB) *lookupStore {
 // without one: the lookup itself succeeded and is delivered regardless, it
 // just cannot be linked to.
 //
+// ctx is the lookup's own. A lookup replaced while this runs has nobody left
+// to give the share id to, so Save then keeps nothing and returns ctx.Err().
+//
 // Expired rows are pruned here rather than on a timer. Saves are the only
 // thing that grows the table, so pruning alongside them bounds it without a
 // goroutine of its own.
-func (ls *lookupStore) Save(query string, ranges []int, filter int, resp *LookupResponse) error {
-	if err := ls.db.Where("created_at < ?", time.Now().Add(-storedLookupTTL)).Delete(&StoredLookup{}).Error; err != nil {
+func (ls *lookupStore) Save(ctx context.Context, query string, ranges []int, filter int, resp *LookupResponse) error {
+	if err := ls.db.WithContext(ctx).Where("created_at < ?", time.Now().Add(-storedLookupTTL)).Delete(&StoredLookup{}).Error; err != nil {
 		log.Printf("Pruning stored lookups failed: %v", err)
 	}
 
@@ -78,7 +82,21 @@ func (ls *lookupStore) Save(query string, ranges []int, filter int, resp *Lookup
 		Filter: filter,
 		Result: string(result),
 	}
-	if err := ls.db.Create(&row).Error; err != nil {
+	err = ls.db.WithContext(ctx).Create(&row).Error
+
+	// The context stops the insert only while it is still running; one that
+	// committed just as the lookup was replaced is undone here instead. Checked
+	// whatever the insert returned, since an interrupted one cannot be trusted
+	// to have left nothing behind, and deleted without the context, which is
+	// by now cancelled.
+	if ctx.Err() != nil {
+		if err := ls.db.Where("id = ?", row.ID).Delete(&StoredLookup{}).Error; err != nil {
+			log.Printf("Removing abandoned stored lookup failed: %v", err)
+		}
+		resp.ResultID = ""
+		return ctx.Err()
+	}
+	if err != nil {
 		resp.ResultID = ""
 		return err
 	}
