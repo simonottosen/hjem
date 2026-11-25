@@ -26,11 +26,11 @@ type Address struct {
 	ID               uint    `json:"-" gorm:"primaryKey"`
 	DawaUUID         string  `json:"dawa_uuid" gorm:"not null;uniqueIndex:idx_addresses_dawa_uuid,where:dawa_uuid <> ''"`
 	DawaID           string  `json:"full_txt" gorm:"not null;unique"`
-	StreetName       string  `json:"street_name" gorm:"not null"`
+	StreetName       string  `json:"street_name" gorm:"not null;index:idx_addresses_street,priority:1"`
 	StreetNumber     string  `json:"street_number" gorm:"not null"`
 	Floor            *string `json:"floor"`
 	Door             *string `json:"door"`
-	PostalCode       string  `json:"zipcode" gorm:"not null"`
+	PostalCode       string  `json:"zipcode" gorm:"not null;index:idx_addresses_street,priority:2"`
 	MunicipalityCode string  `json:"municipality_code" gorm:"not null"`
 	Latitude         float64 `json:"lat" gorm:"not null"`
 	Longtitude       float64 `json:"long" gorm:"not null"`
