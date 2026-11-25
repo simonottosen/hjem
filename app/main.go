@@ -91,31 +91,22 @@ func connectDB(sqliteFile string) (*gorm.DB, string) {
 		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=5",
 			pgHost, pgPort, pgUser, pgPass, pgDB)
 
-		log.Printf("Attempting PostgreSQL connection to %s:%s/%s...", pgHost, pgPort, pgDB)
+		name := fmt.Sprintf("PostgreSQL %s:%s/%s", pgHost, pgPort, pgDB)
+		log.Printf("Attempting %s connection...", name)
 
-		db, err := gorm.Open(postgres.Open(dsn), gormConfig())
-		if err == nil {
-			sqlDB, err := db.DB()
-			if err == nil {
-				sqlDB.SetMaxOpenConns(25)
-				sqlDB.SetMaxIdleConns(5)
-
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := sqlDB.PingContext(ctx); err == nil {
-					return db, fmt.Sprintf("PostgreSQL %s:%s/%s", pgHost, pgPort, pgDB)
-				} else {
-					log.Printf("PostgreSQL ping failed: %v — falling back to SQLite", err)
-				}
-			} else {
-				log.Printf("PostgreSQL DB() failed: %v — falling back to SQLite", err)
-			}
-		} else {
-			log.Printf("PostgreSQL connection failed: %v — falling back to SQLite", err)
+		// No falling back to SQLite. Setting POSTGRES_PASSWORD chose
+		// PostgreSQL, and a server that quietly ran on SQLite instead would
+		// start from an empty cache, write to a file in the container that the
+		// next restart throws away, and report healthy throughout. Once the
+		// few attempts below are spent, exiting leaves any further retrying to
+		// the restart policy, where it is visible.
+		db, err := connectPostgres(dsn)
+		if err != nil {
+			log.Fatalf("%s: %v (POSTGRES_PASSWORD is set, so not falling back to SQLite)", name, err)
 		}
+		return db, name
 	}
 
-	// Fallback to SQLite
 	db, err := gorm.Open(sqlite.Open(sqliteFile), gormConfig())
 	if err != nil {
 		panic("failed to connect to any database")
@@ -131,6 +122,49 @@ func connectDB(sqliteFile string) (*gorm.DB, string) {
 	db.Exec("PRAGMA busy_timeout=5000")
 
 	return db, fmt.Sprintf("SQLite %s", sqliteFile)
+}
+
+// A few attempts rather than one: a server started alongside its database
+// (`docker compose up`) routinely comes up first, and without a restart policy
+// a single refused connection would end it for good.
+const (
+	pgConnectAttempts = 5
+	pgRetryDelay      = 3 * time.Second
+)
+
+func connectPostgres(dsn string) (*gorm.DB, error) {
+	for attempt := 1; ; attempt++ {
+		db, err := openPostgres(dsn)
+		if err == nil {
+			return db, nil
+		}
+		if attempt == pgConnectAttempts {
+			return nil, err
+		}
+		log.Printf("PostgreSQL attempt %d/%d failed: %v — retrying in %s", attempt, pgConnectAttempts, err, pgRetryDelay)
+		time.Sleep(pgRetryDelay)
+	}
+}
+
+func openPostgres(dsn string) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(dsn), gormConfig())
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(5)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func envOrDefault(key, defaultVal string) string {
