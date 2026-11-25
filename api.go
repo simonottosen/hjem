@@ -108,6 +108,13 @@ func (s *server) handleLookup() http.HandlerFunc {
 			return
 		}
 
+		// Before Admit, so a request that could never have produced a result
+		// neither spends the client's budget nor holds a session.
+		if err := validateLookup(req.Query, req.Ranges); err != nil {
+			replyJSONErr(w, err, http.StatusBadRequest)
+			return
+		}
+
 		// Checked before a session exists rather than after: one created and
 		// then refused would hold a slot under maxActiveSessions as an
 		// in-flight lookup that never runs, for the whole half hour until the
@@ -706,6 +713,31 @@ func (s *server) constructRanges(addr *Address, nearby []int) (map[int][]*Addres
 	}
 
 	return o, nil
+}
+
+// The page offers 250 to 1000 metres and sends one of them. The bounds are what
+// a lookup can cost, not a matter of taste: every radius is its own DAR search,
+// paginated until DAR runs out of addresses, and every street those addresses
+// lie on becomes Boliga fetch work. The per-client budget limits how many
+// lookups a client starts, not how large any one of them is.
+const (
+	maxLookupRadius = 1000
+	maxLookupRanges = 4
+)
+
+func validateLookup(query string, ranges []int) error {
+	if strings.TrimSpace(query) == "" {
+		return errors.New("angiv en adresse")
+	}
+	if len(ranges) == 0 || len(ranges) > maxLookupRanges {
+		return fmt.Errorf("angiv mellem 1 og %d radier", maxLookupRanges)
+	}
+	for _, r := range ranges {
+		if r <= 0 || r > maxLookupRadius {
+			return fmt.Errorf("radius %d m er uden for 1–%d m", r, maxLookupRadius)
+		}
+	}
+	return nil
 }
 
 func replyJSONErr(w http.ResponseWriter, err error, sc int) {
