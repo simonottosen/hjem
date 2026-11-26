@@ -3,8 +3,9 @@ import { ExternalLink } from "lucide-react";
 import { useSearch } from "@/hooks/useSearch";
 import { useProgress } from "@/hooks/useProgress";
 import { useFilteredData } from "@/hooks/useFilteredData";
-import { useStoredResult, writeSearchLink, type SearchLink } from "@/hooks/useStoredResult";
-import { SearchForm } from "@/components/SearchForm";
+import { useStoredResult, writeSearchLink, type FullSearchLink } from "@/hooks/useStoredResult";
+import { SearchForm, type AreaMode } from "@/components/SearchForm";
+import type { LonLat } from "@/lib/area";
 import { ProgressBar } from "@/components/ProgressBar";
 import { ProgressMap } from "@/components/ProgressMap";
 import { ErrorAlert } from "@/components/ErrorAlert";
@@ -38,10 +39,18 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("1");
   const [range, setRange] = useState("250");
+  // The radius stays remembered while an area is drawn, so switching back
+  // finds it as it was left — and the other way round.
+  const [mode, setMode] = useState<AreaMode>("radius");
+  const [area, setArea] = useState<LonLat[] | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   // When the result on screen was made, if it came from a link rather than a
   // search run just now.
   const [storedAt, setStoredAt] = useState<string | null>(null);
+  // The search behind the result on screen, which the form stops describing
+  // as soon as the user touches it. One click on the area toggle would
+  // otherwise turn the CSV link into a download of a different search.
+  const [searched, setSearched] = useState<FullSearchLink | null>(null);
 
   // Address exclusion state
   const [excludedAddrs, setExcludedAddrs] = useState<Set<number>>(new Set());
@@ -73,47 +82,79 @@ export default function App() {
   // Takes the search as arguments rather than reading the form state, which a
   // link has only just asked React to set.
   const runSearch = useCallback(
-    (link: Required<SearchLink>) => {
+    (link: FullSearchLink) => {
       setHasSearched(true);
       setExcludedAddrs(new Set());
       setStoredAt(null);
+      setSearched(link);
       reset();
       // The address goes into the URL now, so a reload mid-lookup searches
       // again; the stored id joins it once there is one.
       writeSearchLink(link);
-      search(link.query, Number(link.range), Number(link.filter), (session) => {
-        startPolling(
-          session,
-          (result) => {
-            setResult(result);
-            writeSearchLink(link, result.result_id);
-          },
-          setSearchError
-        );
-      });
+      search(
+        link.query,
+        Number(link.range),
+        Number(link.filter),
+        (session) => {
+          startPolling(
+            session,
+            (result) => {
+              setResult(result);
+              writeSearchLink(link, result.result_id);
+            },
+            setSearchError
+          );
+        },
+        link.area
+      );
     },
     [search, reset, startPolling, setResult, setSearchError]
   );
 
   const handleSearch = useCallback(() => {
     if (!query.trim()) return;
-    runSearch({ query, range, filter });
-  }, [query, range, filter, runSearch]);
+    if (mode === "area") {
+      if (!area) return;
+      runSearch({ query, range, filter, area });
+    } else {
+      runSearch({ query, range, filter });
+    }
+  }, [query, range, filter, mode, area, runSearch]);
 
   const linkPending = useStoredResult(
     (stored) => {
-      setQuery(stored.query);
-      setRange(String(stored.ranges[0] ?? range));
-      setFilter(String(stored.filter));
+      const full = {
+        query: stored.query,
+        range: String(stored.ranges[0] ?? range),
+        filter: String(stored.filter),
+        area: stored.area?.length ? stored.area : undefined,
+      };
+      setQuery(full.query);
+      setRange(full.range);
+      if (full.area) {
+        setMode("area");
+        setArea(full.area);
+      }
+      setFilter(full.filter);
       setHasSearched(true);
       setStoredAt(stored.created_at);
+      setSearched(full);
       setResult(stored.result);
     },
     (link) => {
-      const full = { query: link.query, range: link.range ?? range, filter: link.filter ?? filter };
+      const full = {
+        query: link.query,
+        range: link.range ?? range,
+        filter: link.filter ?? filter,
+        area: link.area,
+      };
       setQuery(full.query);
       setRange(full.range);
       setFilter(full.filter);
+      if (full.area) {
+        setMode("area");
+        setArea(full.area);
+      }
       runSearch(full);
     }
   );
@@ -122,9 +163,13 @@ export default function App() {
     query,
     filter,
     range,
+    mode,
+    area,
     onQueryChange: setQuery,
     onFilterChange: setFilter,
     onRangeChange: setRange,
+    onModeChange: setMode,
+    onAreaChange: setArea,
     onSearch: handleSearch,
     isLoading: isLoading || linkPending,
   };
@@ -186,7 +231,8 @@ export default function App() {
 
         {!isLoading && !error && foundNoSales && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            Ingen sammenlignelige salg fundet i området. Prøv at søge med en større radius.
+            Ingen sammenlignelige salg fundet i området.{" "}
+            {searched?.area ? "Prøv at tegne et større område." : "Prøv at søge med en større radius."}
           </div>
         )}
 
@@ -194,8 +240,9 @@ export default function App() {
           <DashboardLayout
             data={filteredData!}
             rawData={data!}
-            query={query}
-            range={Number(range)}
+            query={searched?.query ?? query}
+            range={Number(searched?.range ?? range)}
+            area={searched?.area ?? null}
             excludedAddrs={excludedAddrs}
             onToggleExcluded={toggleExcluded}
           />

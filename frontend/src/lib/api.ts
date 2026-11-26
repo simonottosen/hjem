@@ -1,4 +1,5 @@
 import type { ProgressEvent, BoligaRelayOutcome, StoredLookup } from "./types";
+import type { LonLat } from "./area";
 
 // Thrown when the server no longer recognises a lookup id: it was replaced by
 // a newer search or it aged out. Polling cannot recover from this, so it is a
@@ -20,19 +21,21 @@ export interface LookupSession {
 
 // Start a lookup job on the server (returns immediately) and return its id.
 // previousLookupId, when we have one, tells the server to cancel our own
-// earlier lookup — and only ours.
+// earlier lookup — and only ours. A drawn area replaces the radius rather than
+// joining it: the server refuses a body carrying both.
 export async function startLookup(
   query: string,
   range: number,
   filter: number,
-  previousLookupId: string | null
+  previousLookupId: string | null,
+  area?: LonLat[]
 ): Promise<LookupSession> {
   const resp = await fetch("/api/lookup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       q: query,
-      ranges: [range],
+      ...(area ? { area } : { ranges: [range] }),
       filter_below_std: filter,
       previous_lookup_id: previousLookupId ?? "",
     }),
@@ -49,6 +52,31 @@ export async function startLookup(
     throw new Error("Serveren returnerede ikke et lookup-id");
   }
   return { lookupId, ingestToken } as LookupSession;
+}
+
+// Where an address is, for the map a search area is drawn on. Unlike the
+// coordinates on Address, these are real latitude and longitude.
+export interface LocatedAddress {
+  address: string;
+  lat: number;
+  lon: number;
+}
+
+// Throws with the server's own Danish explanation — no match, or more than
+// one — which the map shows as a sentence of its own, so a failure to reach
+// the server at all is put in Danish here rather than surfacing the browser's
+// own words.
+export async function locateAddress(query: string): Promise<LocatedAddress> {
+  const resp = await fetch(`/api/locate?q=${encodeURIComponent(query)}`).catch(() => {
+    throw new Error("Kunne ikke kontakte serveren. Prøv igen.");
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const msg: string = data.error || `Server error ${resp.status}`;
+    // The server's errors are written to follow a colon, lowercase.
+    throw new Error(msg.charAt(0).toUpperCase() + msg.slice(1));
+  }
+  return data;
 }
 
 // Hand the streets we fetched back to the lookup that asked for them. The

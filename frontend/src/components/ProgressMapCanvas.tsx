@@ -18,11 +18,12 @@ import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type { MapProgress } from "@/lib/types";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { streetKey } from "@/lib/boliga";
+import { bbox } from "@/lib/area";
 
 // Positron is grayscale at the source. Desaturating a colour style with a CSS
 // filter would have washed out the orange dots too: they render into the same
 // WebGL canvas as the basemap.
-const STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
+export const STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 maplibregl.setWorkerUrl(workerUrl);
 
@@ -42,6 +43,7 @@ const SETTLED = "hjem-settled";
 const ENTERING = "hjem-entering";
 const MISSED = "hjem-missed";
 const SUBJECT = "hjem-subject";
+const AREA = "hjem-area";
 
 type Points = [number, number][];
 
@@ -137,7 +139,7 @@ export function ProgressMapCanvas({ map }: ProgressMapProps) {
       m = new maplibregl.Map({
         container: containerRef.current,
         style: STYLE_URL,
-        bounds: radiusBounds(plan.lat, plan.lon, plan.radius_m),
+        bounds: plan.area?.length ? bbox(plan.area) : radiusBounds(plan.lat, plan.lon, plan.radius_m),
         fitBoundsOptions: { padding: 24 },
         // Ambient feedback, not a map the user is meant to drive. This also
         // stops the element swallowing scrolls on mobile.
@@ -156,6 +158,26 @@ export function ProgressMapCanvas({ map }: ProgressMapProps) {
     m.on("load", () => {
       for (const id of [MISSED, SETTLED, ENTERING, SUBJECT]) {
         m.addSource(id, { type: "geojson", data: pointCollection([]) });
+      }
+
+      // A drawn area has edges the dots alone would not show, unlike a circle
+      // that the dots trace out by themselves. Added first, so it lies under
+      // every dot.
+      if (plan.area?.length) {
+        m.addSource(AREA, {
+          type: "geojson",
+          data: {
+            type: "Feature",
+            properties: {},
+            geometry: { type: "Polygon", coordinates: [[...plan.area, plan.area[0]]] },
+          },
+        });
+        m.addLayer({
+          id: AREA,
+          type: "line",
+          source: AREA,
+          paint: { "line-color": ORANGE, "line-width": 1.5, "line-opacity": 0.6 },
+        });
       }
 
       // Streets Boliga refused: outlined rather than filled, so a failed fetch

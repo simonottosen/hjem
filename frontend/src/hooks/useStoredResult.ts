@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import type { StoredLookup } from "@/lib/types";
 import { fetchStoredResult } from "@/lib/api";
+import { checkArea, decodePolyline, encodePolyline, type LonLat } from "@/lib/area";
 
 // A search as a link carries it. Radius and filter are optional: a link
 // typed or pasted by hand with only an address still works, on the form's
-// defaults.
+// defaults. An area, when there is one, is the search's instead of the radius.
 export interface SearchLink {
   query: string;
   range?: string;
   filter?: string;
+  area?: LonLat[];
 }
+
+// A search ready to run: every option settled, and an area only if drawn.
+export type FullSearchLink = Required<Omit<SearchLink, "area">> & Pick<SearchLink, "area">;
 
 // The options SearchForm offers. A link is text anyone can edit, and a value
 // outside these would leave its select blank and send the server a radius or
@@ -19,6 +24,14 @@ const FILTERS = ["-1", "1", "2", "3"];
 
 function option(value: string | null, allowed: string[]): string | undefined {
   return value !== null && allowed.includes(value) ? value : undefined;
+}
+
+// Held to what the server would accept, for the same reason as the options
+// above: a link with an area it refuses would only ever end in an error, where
+// dropping it still shows the address on the radius.
+function drawnArea(value: string | null): LonLat[] | undefined {
+  const ring = value ? decodePolyline(value) : null;
+  return ring && checkArea(ring) === null ? ring : undefined;
 }
 
 export function readSearchLink(search: string): {
@@ -34,6 +47,7 @@ export function readSearchLink(search: string): {
           query,
           range: option(params.get("r"), RANGES),
           filter: option(params.get("f"), FILTERS),
+          area: drawnArea(params.get("a")),
         }
       : null,
   };
@@ -42,11 +56,12 @@ export function readSearchLink(search: string): {
 // Replaced, not pushed: each search would otherwise leave a history entry
 // that Back returns to without the page changing, since nothing here listens
 // for navigation.
-export function writeSearchLink(link: Required<SearchLink>, resultId?: string) {
+export function writeSearchLink(link: FullSearchLink, resultId?: string) {
   const params = new URLSearchParams();
   if (resultId) params.set("lookup", resultId);
   params.set("q", link.query);
-  params.set("r", link.range);
+  if (link.area) params.set("a", encodePolyline(link.area));
+  else params.set("r", link.range);
   params.set("f", link.filter);
   window.history.replaceState(null, "", `?${params}`);
 }

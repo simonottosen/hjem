@@ -89,6 +89,9 @@ export interface LookupResponse {
 export interface StoredLookup {
   query: string;
   ranges: number[];
+  // The drawn area, as [lon, lat], when the search was one. Its ranges are
+  // then meaningless.
+  area?: [number, number][];
   filter: number;
   created_at: string;
   result: LookupResponse;
@@ -139,7 +142,10 @@ export interface MapStreet {
 export interface MapPlan {
   lat: number;
   lon: number;
+  // 0 for a drawn search, which sets area instead: [lon, lat] pairs, the
+  // reverse of the street points below.
   radius_m: number;
+  area?: [number, number][];
   streets: MapStreet[];
 }
 

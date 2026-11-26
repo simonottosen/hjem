@@ -38,3 +38,38 @@ it("says when a linked result with no sales was made", async () => {
   await screen.findByText(/Ingen sammenlignelige salg fundet/);
   expect(screen.getByText(/Resultat fra/).textContent).toContain("2. nov. 2026");
 });
+
+// A drawn search has no radius to go back to; showing the radius dropdown
+// would make the next search a different one from the result on screen.
+it("restores a linked result's drawn area", async () => {
+  const stored: StoredLookup = {
+    query: "Flensborggade 40",
+    ranges: [],
+    area: [
+      [12.548, 55.671],
+      [12.555, 55.67],
+      [12.553, 55.675],
+    ],
+    filter: 1,
+    created_at: "2026-11-02T12:40:12Z",
+    result: {
+      primary_idx: 0,
+      addresses: [],
+      sales: [],
+      ranges: null,
+      sqmeters: { global: {}, projections: [] },
+    },
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => stored })
+  );
+  window.history.replaceState(null, "", "/?lookup=abc&q=Flensborggade+40&a=x&f=1");
+
+  render(<App />);
+
+  await screen.findByText(/Prøv at tegne et større område/);
+  expect(screen.getByRole("button", { name: "Tegn område" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByText(/Område: 0,1\d km²/)).toBeTruthy();
+  expect(screen.queryByRole("combobox", { name: "Søgeradius" })).toBeNull();
+});
