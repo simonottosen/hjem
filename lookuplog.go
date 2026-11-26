@@ -21,6 +21,7 @@ type lookupLog struct {
 	id        string
 	query     string
 	ranges    []int
+	area      []lonLat
 	startedAt time.Time
 
 	stages []lookupStage
@@ -61,6 +62,12 @@ func (l *lookupLog) emit(outcome ProgressStage, message string) {
 			radii[i] = strconv.Itoa(r)
 		}
 		fmt.Fprintf(&b, " radius=%s", strings.Join(radii, ","))
+	}
+	// The size rather than the vertices: what a slow or empty area search
+	// raises is how much ground it covered, and two hundred coordinate pairs
+	// would bury the rest of the line.
+	if len(l.area) > 0 {
+		fmt.Fprintf(&b, " area=%dpts/%.2fkm2", len(l.area), areaKM2(l.area))
 	}
 	if outcome == StageError {
 		fmt.Fprintf(&b, " err=%q", message)

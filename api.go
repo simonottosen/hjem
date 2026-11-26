@@ -119,7 +119,10 @@ func (s *server) handleLookup() http.HandlerFunc {
 	type Request struct {
 		Query  string `json:"q"`
 		Ranges []int  `json:"ranges"`
-		Filter int    `json:"filter_below_std"`
+		// Area is a drawn polygon searched instead of the radii; a request
+		// carries one or the other. See validateArea.
+		Area   []lonLat `json:"area"`
+		Filter int      `json:"filter_below_std"`
 		// PreviousID is the caller's own last lookup id, if it has one. It is
 		// what makes "a new search replaces my old one" work without also
 		// replacing other users' searches.
@@ -140,7 +143,8 @@ func (s *server) handleLookup() http.HandlerFunc {
 
 		// Before Admit, so a request that could never have produced a result
 		// neither spends the client's budget nor holds a session.
-		if err := validateLookup(req.Query, req.Ranges); err != nil {
+		area, err := validateLookup(req.Query, req.Ranges, req.Area)
+		if err != nil {
 			replyJSONErr(w, err, http.StatusBadRequest)
 			return
 		}
@@ -163,7 +167,7 @@ func (s *server) handleLookup() http.HandlerFunc {
 		// Run the lookup in a background goroutine so the HTTP response
 		// returns immediately. The frontend polls /api/progress for status
 		// and the result. This avoids Cloudflare tunnel timeouts.
-		go s.runLookup(sess, req.Query, req.Ranges, req.Filter)
+		go s.runLookup(sess, req.Query, req.Ranges, area, req.Filter)
 
 		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -174,7 +178,7 @@ func (s *server) handleLookup() http.HandlerFunc {
 	}
 }
 
-func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filter int) {
+func (s *server) runLookup(sess *lookupSession, query string, ranges []int, area []lonLat, filter int) {
 	s.stats.RecordLookup()
 
 	// Releases the context once this lookup is done one way or another.
@@ -189,7 +193,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Deferred so every exit is reported, the error returns below included:
 	// those only ever told the browser what went wrong, so a search that failed
 	// in production left no trace in the server log that it had run at all.
-	rec := &lookupLog{id: sess.ID, query: query, ranges: ranges, startedAt: time.Now()}
+	rec := &lookupLog{id: sess.ID, query: query, ranges: ranges, area: area, startedAt: time.Now()}
 	defer func() { rec.emit(p.Outcome()) }()
 
 	// Helper: check if this lookup was cancelled (replaced by a newer search
@@ -234,7 +238,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	addr := addrs[0]
 
 	p.Update(StageDawa, "Henter nærliggende adresser...", 0, 0)
-	rangeMap, err := s.constructRanges(addr, ranges)
+	rangeMap, err := s.constructRanges(addr, ranges, area)
 	endStage("nearby")
 	if err != nil {
 		p.Update(StageError, err.Error(), 0, 0)
@@ -253,7 +257,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Before the stage change, not after: the plan only ships on the Boliga
 	// stages, and a client polling in between would start the visualization
 	// with nothing to draw and never ask again.
-	p.SetMapPlan(buildMapPlan(addr, addrs, ranges))
+	p.SetMapPlan(buildMapPlan(addr, addrs, ranges, area))
 
 	p.Update(StageBoligaList, "Henter salgslister fra Boliga...", 0, 0)
 	sales, fetchWarnings, err := s.bc.FetchSales(addrs, p, s.stats, s.clientStreetFetcher(sess, rec))
@@ -328,7 +332,7 @@ func (s *server) runLookup(sess *lookupSession, query string, ranges []int, filt
 	// Kept before delivery so the page receives the share id with the
 	// result. A failed save costs the link, not the lookup — unless it failed
 	// because the lookup was replaced meanwhile, which Save has then undone.
-	if err := s.results.Save(sess.ctx, query, ranges, filter, luResp); err != nil {
+	if err := s.results.Save(sess.ctx, query, ranges, area, filter, luResp); err != nil {
 		if cancelled() {
 			log.Printf("Lookup cancelled before result delivery for %q", query)
 			return
@@ -631,13 +635,30 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 			// handle error
 		}
 		query := queries[0]
-		reqranges, ok := params["range"]
-		if !ok {
-			// handle error
-		}
-		rang, err := strconv.Atoi(reqranges[0])
-		if err != nil {
-			// handle error
+
+		// a= is a drawn area, encoded as in the page's own links; it replaces
+		// range= rather than adding to it, as area replaces ranges on a lookup.
+		var nearby []int
+		var area []lonLat
+		if enc := params.Get("a"); enc != "" {
+			pts, err := decodePolyline(enc)
+			if err == nil {
+				area, err = validateArea(pts)
+			}
+			if err != nil {
+				replyJSONErr(w, err, http.StatusBadRequest)
+				return
+			}
+		} else {
+			reqranges, ok := params["range"]
+			if !ok {
+				// handle error
+			}
+			rang, err := strconv.Atoi(reqranges[0])
+			if err != nil {
+				// handle error
+			}
+			nearby = []int{rang}
 		}
 
 		addrs, err := s.dc.Do(AVFuzzySearch{
@@ -653,7 +674,7 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 		}
 		addr := addrs[0]
 
-		ranges, err := s.constructRanges(addr, []int{rang})
+		ranges, err := s.constructRanges(addr, nearby, area)
 		if err != nil {
 			// handle error
 		}
@@ -694,6 +715,50 @@ func (s *server) handleCSVDownload() http.HandlerFunc {
 
 			}
 		}
+	}
+}
+
+// handleLocate resolves an address to a point, for the page to centre its map
+// on before the user draws an area around it. It is the same resolution a
+// lookup starts with, through the same cache, so the lookup that follows finds
+// it already answered. It is not charged to the client's lookup budget: it is
+// one address resolution, not the minutes of work a lookup is — though a query
+// that matches nothing is not cached, so asking it again asks Adressevælger
+// again.
+func (s *server) handleLocate() http.HandlerFunc {
+	type Reply struct {
+		Address string  `json:"address"`
+		Lat     float64 `json:"lat"`
+		Lon     float64 `json:"lon"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// Passed on untrimmed, as runLookup passes it, so both share a cache key.
+		query := r.URL.Query().Get("q")
+		if strings.TrimSpace(query) == "" {
+			replyJSONErr(w, errors.New("angiv en adresse"), http.StatusBadRequest)
+			return
+		}
+
+		addrs, err := s.dc.Do(AVFuzzySearch{Query: query})
+		if err != nil {
+			replyJSONErr(w, err, http.StatusBadGateway)
+			return
+		}
+		if len(addrs) > 1 {
+			replyJSONErr(w, errors.New("adressen er ikke entydig, angiv den mere præcist"), http.StatusConflict)
+			return
+		}
+		if len(addrs) == 0 {
+			replyJSONErr(w, errors.New("adressen blev ikke fundet"), http.StatusNotFound)
+			return
+		}
+
+		// Through addrLatLon: Address keeps longitude in .Latitude.
+		lat, lon := addrLatLon(*addrs[0])
+		replyJSON(w, Reply{Address: addrs[0].DawaID, Lat: lat, Lon: lon}, http.StatusOK)
 	}
 }
 
@@ -774,6 +839,7 @@ func (s *server) Routes() *http.ServeMux {
 	mux.HandleFunc("/", s.handleIndex())
 	mux.Handle("/dist/", s.handleDist())
 	mux.HandleFunc("/api/lookup", s.handleLookup())
+	mux.HandleFunc("/api/locate", s.handleLocate())
 	mux.HandleFunc("/api/progress", s.handleProgress())
 	mux.HandleFunc("/api/result", s.handleResult())
 	mux.HandleFunc("/api/boliga/ingest", s.handleBoligaIngest())
@@ -785,13 +851,24 @@ func (s *server) Routes() *http.ServeMux {
 	return mux
 }
 
-func (s *server) constructRanges(addr *Address, nearby []int) (map[int][]*Address, error) {
-	o := make(map[int][]*Address)
+// constructRanges runs one nearby search per radius, or the one search of a
+// drawn area. An area is keyed 0 in the result, the Meters its search carries:
+// no radius can be 0, so the key cannot collide with one.
+func (s *server) constructRanges(addr *Address, nearby []int, area []lonLat) (map[int][]*Address, error) {
+	searches := make([]DARNearbySearch, 0, len(nearby)+1)
 	for _, r := range nearby {
-		addrs, err := s.dc.Do(DARNearbySearch{
+		searches = append(searches, DARNearbySearch{
 			Addr:   *addr,
 			Meters: r,
 		})
+	}
+	if area != nil {
+		searches = append(searches, DARNearbySearch{Addr: *addr, Area: area})
+	}
+
+	o := make(map[int][]*Address)
+	for _, search := range searches {
+		addrs, err := s.dc.Do(search)
 		if err != nil {
 			return nil, err
 		}
@@ -804,7 +881,7 @@ func (s *server) constructRanges(addr *Address, nearby []int) (map[int][]*Addres
 			}
 		}
 
-		o[r] = addrs
+		o[search.Meters] = addrs
 	}
 
 	return o, nil
@@ -820,19 +897,29 @@ const (
 	maxLookupRanges = 4
 )
 
-func validateLookup(query string, ranges []int) error {
+// validateLookup returns the area normalised by validateArea, nil for a radius
+// search. An area present at all, even empty, makes it an area search, so that
+// "area": [] is reported as an area with too few points rather than as missing
+// radii.
+func validateLookup(query string, ranges []int, area []lonLat) ([]lonLat, error) {
 	if strings.TrimSpace(query) == "" {
-		return errors.New("angiv en adresse")
+		return nil, errors.New("angiv en adresse")
+	}
+	if area != nil {
+		if len(ranges) > 0 {
+			return nil, errors.New("angiv enten radier eller et område, ikke begge")
+		}
+		return validateArea(area)
 	}
 	if len(ranges) == 0 || len(ranges) > maxLookupRanges {
-		return fmt.Errorf("angiv mellem 1 og %d radier", maxLookupRanges)
+		return nil, fmt.Errorf("angiv mellem 1 og %d radier", maxLookupRanges)
 	}
 	for _, r := range ranges {
 		if r <= 0 || r > maxLookupRadius {
-			return fmt.Errorf("radius %d m er uden for 1–%d m", r, maxLookupRadius)
+			return nil, fmt.Errorf("radius %d m er uden for 1–%d m", r, maxLookupRadius)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func replyJSONErr(w http.ResponseWriter, err error, sc int) {

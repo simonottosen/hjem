@@ -44,19 +44,20 @@ docker run -p 8080:8080 hjem
 ## Architecture
 
 ### Request lifecycle
-1. Frontend `POST /api/lookup` (address + radius) → immediate 202 Accepted carrying a `lookup_id`
+1. Frontend `POST /api/lookup` (address + `ranges`, or address + a drawn `area` of `[lon, lat]` vertices — exactly one of the two) → immediate 202 Accepted carrying a `lookup_id`. Both are validated before the lookup is charged to the client's budget. To draw an area the page first calls `GET /api/locate?q=` (address → `{address, lat, lon}`, cached, not charged) to centre its map
 2. Backend creates a session (`sessions.go`) and spawns a goroutine running `runLookup()` in `api.go`
 3. Frontend polls `GET /api/progress?id=<lookup_id>` every ~2s until `done: true`. A 404 means the session was replaced or expired, and the client stops polling instead of hanging
 4. Backend updates that session's own `Progress` struct (in `progress.go`) as each stage completes:
-   - Adressevælger free-text address lookup → DAR radius search for nearby addresses
+   - Adressevælger free-text address lookup → DAR radius (or drawn-area) search for nearby addresses
    - Boliga sales scrape (cached 3 days in DB via GORM)
    - Comps estimation (weighted by recency, size, rooms, age, distance)
    - Square-meter aggregation by year
    - Dingeo valuations (optional, skipped if FlareSolverr unavailable)
-5. The finished response is stored (`storedlookup.go`) under a share id, separate from the `lookup_id`, and returned as `result_id`. The page writes `?lookup=<result_id>&q=…&r=…&f=…` into the address bar; opening that link fetches `GET /api/result?id=` and renders without re-running the lookup. Stored results expire after 30 days, after which the link falls back to searching `q` afresh
+5. The finished response is stored (`storedlookup.go`) under a share id, separate from the `lookup_id`, and returned as `result_id`. The page writes `?lookup=<result_id>&q=…&r=…&f=…` (or `a=<polyline>` in place of `r=` for an area) into the address bar; opening that link fetches `GET /api/result?id=` and renders without re-running the lookup. Stored results expire after 30 days, after which the link falls back to searching `q` afresh
 
 ### Backend files
-- `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration
+- `api.go` — HTTP routes, `handleLookup`, `runLookup` orchestration, `handleLocate`. `/download/csv` takes `a=<polyline>` (Google encoded polyline, precision 5) as an alternative to `range=`
+- `area.go` — drawn-area search: `validateArea` (rounds to 1e-5°, the link's polyline precision, so lookup, link and CSV search one ring under one cache key; 3–200 vertices, inside Denmark, simple ring, 100 m² to π·1000² m² measured in EPSG:25832), `areaWKT` (numbers re-formatted from the projected floats, never copied from the request, because the WKT is inlined into the GraphQL text), `decodePolyline`. A `DARNearbySearch` with `Area` set searches it instead of the circle and is cache-keyed by a SHA-256 of its WKT, because the key is the cache table's primary key; an area is filed under range key `0`
 - `boliga.go` — Boliga.dk scraper with DB caching
 - `adressevaelger.go` — Adressevælgeren: free-text address search (phonetic → ASCII re-spelling → `/vask/` for historical designations; dead addresses and interval matches are rejected rather than substituted), plus batch enrichment of DAR results with street/postal/municipality
 - `datafordeler.go` — Datafordeleren DAR GraphQL radius search + EPSG:25832 projection. DAR caps a page at 1000 nodes and rejects a larger `first`, so all three queries are cursor-paginated via `darPostAll`; reading one page silently under-samples dense areas

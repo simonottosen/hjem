@@ -29,7 +29,7 @@ func TestStoredLookupRoundTrip(t *testing.T) {
 		Sales:        []*JSONSale{{AddrIndex: 0, Amount: 3_100_000, SqMeters: 74}},
 		Warnings:     []string{"en advarsel"},
 	}
-	if err := s.results.Save(context.Background(), "Flensborggade 40", []int{500}, 2, resp); err != nil {
+	if err := s.results.Save(context.Background(), "Flensborggade 40", []int{500}, nil, 2, resp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	if len(resp.ResultID) != 32 {
@@ -119,7 +119,7 @@ func TestStoredLookupSavePrunesExpired(t *testing.T) {
 		}
 	}
 
-	if err := s.results.Save(context.Background(), "q", []int{250}, 1, &LookupResponse{}); err != nil {
+	if err := s.results.Save(context.Background(), "q", []int{250}, nil, 1, &LookupResponse{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -153,7 +153,7 @@ func TestStoredLookupSaveCancelledLeavesNoRow(t *testing.T) {
 	}
 
 	resp := &LookupResponse{}
-	if err := s.results.Save(ctx, "Flensborggade 40", []int{250}, 1, resp); err == nil {
+	if err := s.results.Save(ctx, "Flensborggade 40", []int{250}, nil, 1, resp); err == nil {
 		t.Error("Save returned nil for a cancelled lookup, want an error")
 	}
 	if resp.ResultID != "" {
