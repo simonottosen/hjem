@@ -16,7 +16,7 @@ import * as maplibregl from "maplibre-gl";
 import { STYLE_URL } from "./ProgressMapCanvas";
 import { Button } from "@/components/ui/button";
 import { locateAddress, type LocatedAddress } from "@/lib/api";
-import { bbox, checkArea, MAX_VERTICES, roundRing, simplify, type LonLat } from "@/lib/area";
+import { bbox, checkArea, MAX_VERTICES, roundRing, simplify, trimLasso, type LonLat } from "@/lib/area";
 
 const ORANGE = "#f97316";
 const AREA_FILL = "hjem-area";
@@ -188,13 +188,14 @@ export function AreaPickerCanvas({ query, area, onAreaChange }: AreaPickerProps)
     if (!m || points.length < 3) return;
     setDrawing(false);
 
+    const loop = trimLasso(points);
     // Coarsened only as far as it takes to fit the server's vertex cap, so a
     // careful outline keeps its detail.
     let tolerance = 1;
-    let simple = simplify(points, tolerance);
+    let simple = simplify(loop, tolerance);
     while (simple.length > MAX_VERTICES) {
       tolerance *= 2;
-      simple = simplify(points, tolerance);
+      simple = simplify(loop, tolerance);
     }
     const ring = roundRing(
       simple.map(([x, y]): LonLat => {

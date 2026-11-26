@@ -121,6 +121,69 @@ export function selfIntersects(ring: LonLat[]): boolean {
   return false;
 }
 
+// Where along each segment ab crosses cd, as fractions [t on ab, u on cd],
+// or null if they do not meet. Parallel segments give none: an overlap has no
+// single point to cut at.
+function crossingAt(a: Point, b: Point, c: Point, d: Point): [number, number] | null {
+  const rx = b[0] - a[0];
+  const ry = b[1] - a[1];
+  const sx = d[0] - c[0];
+  const sy = d[1] - c[1];
+  const den = rx * sy - ry * sx;
+  if (den === 0) return null;
+  const qx = c[0] - a[0];
+  const qy = c[1] - a[1];
+  const t = (qx * sy - qy * sx) / den;
+  const u = (qx * ry - qy * rx) / den;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return [t, u];
+}
+
+// How much of a stroke, by length, may be cut off at each end.
+const LASSO_TAIL_SHARE = 1 / 4;
+
+// A lasso rarely ends exactly where it began: the finger runs on past the
+// start, or sets down a little before the loop proper. Either way the stroke
+// crosses itself near its ends, and taken as drawn the ring would be refused
+// as self-crossing. This cuts the stroke at that crossing and keeps the loop
+// between, the area the user plainly meant. Only a crossing within the first
+// and last quarter of the stroke counts, so a figure eight, which crosses
+// nearer the middle, is left whole to be refused rather than quietly halved.
+// Of those, the cut that keeps the longest loop wins. Screen pixels in, as for
+// simplify; a stroke with no such crossing comes back as it was.
+export function trimLasso(points: Point[]): Point[] {
+  const n = points.length;
+  const along = [0];
+  for (let k = 1; k < n; k++) {
+    along.push(along[k - 1] + Math.hypot(points[k][0] - points[k - 1][0], points[k][1] - points[k - 1][1]));
+  }
+  const total = along[n - 1] ?? 0;
+  const headEnd = total * LASSO_TAIL_SHARE;
+  const tailStart = total * (1 - LASSO_TAIL_SHARE);
+  let best: { i: number; j: number; at: Point; kept: number } | null = null;
+  // Segment k runs from points[k] to points[k + 1]. The loop bounds only
+  // prune; whether a crossing is near enough an end is decided on the
+  // crossing itself, since one long segment can reach well past a quarter.
+  for (let i = 0; i + 1 < n && along[i] <= headEnd; i++) {
+    for (let j = n - 2; j >= i + 2 && along[j + 1] >= tailStart; j--) {
+      const tu = crossingAt(points[i], points[i + 1], points[j], points[j + 1]);
+      if (!tu) continue;
+      const posI = along[i] + tu[0] * (along[i + 1] - along[i]);
+      const posJ = along[j] + tu[1] * (along[j + 1] - along[j]);
+      if (posI > headEnd || posJ < tailStart) continue;
+      if (!best || posJ - posI > best.kept) {
+        const [a, b] = [points[i], points[i + 1]];
+        best = { i, j, at: [a[0] + tu[0] * (b[0] - a[0]), a[1] + tu[0] * (b[1] - a[1])], kept: posJ - posI };
+      }
+      // Walking j down from the end, the first crossing is this i's longest.
+      break;
+    }
+  }
+  if (!best) return points.slice();
+  const loop = [best.at, ...points.slice(best.i + 1, best.j + 1)];
+  return loop.length >= 3 ? loop : points.slice();
+}
+
 // Projected flat around the ring's own centre, which over a few kilometres is
 // within a fraction of a percent of the true area (see PAGE_MAX_AREA_M2).
 export function areaM2(ring: LonLat[]): number {

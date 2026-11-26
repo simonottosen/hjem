@@ -7,6 +7,7 @@ import {
   MAX_VERTICES,
   selfIntersects,
   simplify,
+  trimLasso,
   type LonLat,
 } from "./area";
 
@@ -53,6 +54,52 @@ it("keeps a corner the tolerance cannot explain away", () => {
     [10, 0],
     [10.1, 10],
   ]);
+});
+
+it("cuts a lasso that runs on past its start down to the loop", () => {
+  // Set down left of the loop, round it, and on past where it began.
+  const stroke: [number, number][] = [
+    [0, 10],
+    [100, 10],
+    [100, 100],
+    [10, 100],
+    [10, -10],
+  ];
+  expect(selfIntersects(stroke)).toBe(true);
+
+  const loop = trimLasso(stroke);
+
+  expect(loop).toEqual([
+    [10, 10],
+    [100, 10],
+    [100, 100],
+    [10, 100],
+  ]);
+  expect(selfIntersects(loop)).toBe(false);
+});
+
+it("leaves a lasso that does not cross itself as drawn", () => {
+  const stroke: [number, number][] = [
+    [0, 0],
+    [100, 0],
+    [100, 100],
+    [0, 100],
+  ];
+  expect(trimLasso(stroke)).toEqual(stroke);
+});
+
+it("does not halve a figure eight", () => {
+  // Its one crossing, at (100, 50), is three tenths of the way round: too far
+  // from either end to be an overshoot, so it stays a figure eight and is
+  // refused as one.
+  const stroke: [number, number][] = [
+    [0, 40],
+    [0, 100],
+    [200, 0],
+    [200, 100],
+    [20, 10],
+  ];
+  expect(selfIntersects(trimLasso(stroke))).toBe(true);
 });
 
 it("tells a bow-tie from a square", () => {
